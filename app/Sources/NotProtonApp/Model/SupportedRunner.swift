@@ -32,7 +32,14 @@ struct RunnerBuild: Sendable, Equatable, Identifiable {
 
     var rebuilds: [RunnerRebuild] = []
 
-    var id: String { flavor.map { "\(bundleVersion)-\($0)" } ?? bundleVersion }
+    // Set when the runner comes from a modified copy of this build. The copy has
+    // the same loader and ntdll, so it is checked and patched the same way, but it
+    // gets its own runner directory and tools.
+    var variant: String? = nil
+
+    var baseID: String { flavor.map { "\(bundleVersion)-\($0)" } ?? bundleVersion }
+
+    var id: String { variant.map { "\(baseID)-\($0)" } ?? baseID }
 
     func matching(loaderSHA256 hash: String) -> RunnerBuild? {
         if hash == loaderSHA256 { return self }
@@ -40,13 +47,47 @@ struct RunnerBuild: Sendable, Equatable, Identifiable {
         return RunnerBuild(
             bundleVersion: bundleVersion, releaseVersion: releaseVersion, flavor: flavor,
             loaderSHA256: rebuild.loaderSHA256, cleanNtdll: rebuild.cleanNtdll,
-            patchedNtdll: rebuild.patchedNtdll, tools: tools, rebuilds: rebuilds
+            patchedNtdll: rebuild.patchedNtdll, tools: tools, rebuilds: rebuilds, variant: variant
         )
     }
 
     var flavorName: String { flavor?.uppercased() ?? "Rosetta" }
 
-    var displayVersion: String { "\(releaseVersion) \(flavorName)" }
+    var displayVersion: String {
+        let version = "\(releaseVersion) \(flavorName)"
+        return variant.map { "\(version) · \(RunnerVariant.label($0))" } ?? version
+    }
+
+    func withVariant(_ variant: String?) -> RunnerBuild {
+        guard let variant else { return self }
+        var copy = self
+        copy.variant = variant
+        let label = RunnerVariant.label(variant)
+        copy.tools = tools.map {
+            CompatTool(name: "\($0.name)-\(variant)", flavor: $0.flavor, display: "\($0.display) · \(label)")
+        }
+        return copy
+    }
+}
+
+enum RunnerVariant {
+    // A copy names itself with this file at the root of its CrossOver directory.
+    static let markerName = "notproton-variant"
+
+    // The first line of the marker as an id: lower-case letters and digits.
+    static func declared(crossOverRoot root: URL) -> String? {
+        guard let text = try? String(contentsOf: root.appending(path: markerName), encoding: .utf8),
+              let line = text.split(whereSeparator: \.isNewline).first else { return nil }
+        let id = String(line.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) })
+        // "fex" would read as the FEX build's id.
+        return id.isEmpty || id == "fex" ? nil : id
+    }
+
+    static func isVariant(_ suffix: String) -> Bool {
+        suffix.wholeMatch(of: #/[a-z0-9]+(-[a-z0-9]+)?/#) != nil
+    }
+
+    static func label(_ variant: String) -> String { variant }
 }
 
 // The version of CrossOver offered in China has different hashes but is identical in the ways that matter
@@ -102,12 +143,13 @@ enum SupportedRunners {
     }
 
     static func tools(for builds: [RunnerBuild], legacy: LegacyHolder = .nobody) -> [InstalledTool] {
-        let installed = Set(builds.map(\.id))
         let holder: String? = switch legacy {
         case .build(let id): id
         case .nobody: nil
         }
-        let served = all.filter { installed.contains($0.id) }.flatMap { build in
+        // The builds given, not `all`: variants are installed but never pinned.
+        let pinned = Set(all.map(\.id))
+        let served = builds.filter { pinned.contains($0.baseID) }.flatMap { build in
             build.tools.enumerated().map { index, tool in
                 let name = build.id == holder && index == 0 ? legacyToolName : tool.name
                 return InstalledTool(
@@ -236,7 +278,12 @@ enum SupportedRunners {
     }
 
     static func build(id: String) -> RunnerBuild? {
-        all.first { $0.id == id }
+        if let exact = all.first(where: { $0.id == id }) { return exact }
+        // "<pinned id>-<variant>". The longest match wins, so a FEX variant stays FEX.
+        guard let base = all.filter({ id.hasPrefix($0.id + "-") }).max(by: { $0.id.count < $1.id.count })
+        else { return nil }
+        let variant = String(id.dropFirst(base.id.count + 1))
+        return RunnerVariant.isVariant(variant) ? base.withVariant(variant) : nil
     }
 
     static func displayVersion(forID id: String) -> String {
