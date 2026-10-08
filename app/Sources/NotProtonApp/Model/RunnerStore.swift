@@ -118,8 +118,10 @@ enum CompatToolList {
             $0.split(separator: "\t").first.map(String.init)
         })
         if case .build = holder { kept.insert(SupportedRunners.legacyToolName) }
-        return (builds, listed, SupportedRunners.tools(
-            for: builds, legacy: holder, fexAvailable: fexAvailable, keeping: kept))
+        let tools = SupportedRunners.tools(for: builds, legacy: holder, fexAvailable: fexAvailable, keeping: kept) {
+            RunnerVariant.activeMajor(crossOverRoot: SupportPaths.clonedRoot(forBuild: $0.id, runners: runners))
+        }
+        return (builds, listed, tools)
     }
 
     // 1.0.x used the single 'notproton' tool name and wrote no tool list, so the

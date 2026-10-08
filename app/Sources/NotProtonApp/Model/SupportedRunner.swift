@@ -186,9 +186,12 @@ enum SupportedRunners {
         case nobody
     }
 
+    // d3dmetal gives the D3DMetal major a build's copy runs, named on tools that do
+    // not already carry it in their variant.
     static func tools(
         for builds: [RunnerBuild], legacy: LegacyHolder = .nobody,
-        fexAvailable: Bool = CompatTool.Flavor.fexAvailable, keeping kept: Set<String> = []
+        fexAvailable: Bool = CompatTool.Flavor.fexAvailable, keeping kept: Set<String> = [],
+        d3dmetal: (RunnerBuild) -> String? = { _ in nil }
     ) -> [InstalledTool] {
         let holder: String? = switch legacy {
         case .build(let id): id
@@ -197,10 +200,12 @@ enum SupportedRunners {
         // The builds given, not `all`: variants are installed but never pinned.
         let pinned = Set(all.map(\.id))
         let served = builds.filter { pinned.contains($0.baseID) }.flatMap { build in
-            build.tools.enumerated().map { index, tool in
+            let label = RunnerVariant.d3dmetal(of: build) == nil ? d3dmetal(build).map { " · D3DMetal \($0)" } : nil
+            return build.tools.enumerated().map { index, tool in
                 let name = build.id == holder && index == 0 ? legacyToolName : tool.name
                 return InstalledTool(
-                    tool: CompatTool(name: name, flavor: tool.flavor, display: tool.display), build: build.id
+                    tool: CompatTool(name: name, flavor: tool.flavor, display: tool.display + (label ?? "")),
+                    build: build.id
                 )
             }
         }.filter { $0.tool.flavor != .fex || fexAvailable || kept.contains($0.name) }
