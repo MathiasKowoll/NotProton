@@ -1358,7 +1358,8 @@ fi
 [ -n "$icon_arg" ] || echo "no icon resolved, launching without one" >> "$log" 2>&1 || true
 
 uielement_arg=""
-if [ "${NOTPROTON_HIDE_LAUNCHER_TILE:-0}" = "1" ]; then
+# The wrapper runs the Steam shim; Wine gives the game its own Dock presence.
+if [ "${NOTPROTON_HIDE_LAUNCHER_TILE:-1}" = "1" ]; then
   uielement_arg="  <key>LSUIElement</key><true/>"
   echo "launcher tile hidden by NOTPROTON_HIDE_LAUNCHER_TILE" >> "$log" 2>&1 || true
 fi
