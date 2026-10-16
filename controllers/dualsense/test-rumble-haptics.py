@@ -368,6 +368,16 @@ finally:
     log.close()
     sock.close()
 
+# A probe names the backend that would run; an unknown backend is refused.
+r = subprocess.run([str(root / "broker"), "--dry-run", "--probe"], capture_output=True, text=True,
+                   timeout=5)
+found = json.loads(r.stdout)
+assert r.returncode == 0 and found["backend"] == "dualsense" and found["eligible"] is False, r
+assert set(found) == {"backend", "bluetooth", "usb", "eligible", "vendor", "product"}, found
+r = subprocess.run([str(root / "broker"), "--dry-run", "--probe", "--backend", "joycon"],
+                   capture_output=True, timeout=5)
+assert r.returncode == 64, r.returncode
+
 # A side cannot wait for itself.
 r = subprocess.run([str(root / "broker"), "--dry-run", "--pcm", "--token", token.hex(),
                     "--triggers", "R2:weapon+R2"], capture_output=True, timeout=5)

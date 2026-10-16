@@ -16,7 +16,11 @@
 
 // Local per-session service. Only receives packets bearing the launch token.
 DSBSession session;
+// The backends this broker can run; --backend names one, the DualSense is the
+// default, and a probe asks them in order.
+static const DSBBackend *const backends[] = {&DSBDualSenseBackend};
 static const DSBBackend *backend = &DSBDualSenseBackend;
+static bool backendChosen;
 static unsigned abilities;
 // --triggers: per-trigger effects for titles that write none (kind[0] R2,
 // kind[1] L2). A side the game writes itself becomes the game's for good.
@@ -288,6 +292,19 @@ static bool parseArguments(int argc, char **argv, BrokerOptions *options) {
                 return false;
             }
             triggerSpec = argv[i];
+        } else if (!strcmp(argv[i], "--backend") && i + 1 < argc) {
+            const DSBBackend *named = NULL;
+            for (size_t b = 0; b < sizeof(backends) / sizeof(backends[0]); b++) {
+                if (!strcmp(backends[b]->name, argv[i + 1])) {
+                    named = backends[b];
+                }
+            }
+            if (!named) {
+                return false;
+            }
+            backend = named;
+            backendChosen = true;
+            i++;
         } else if (!strcmp(argv[i], "--dry-run")) {
             session.dry = true;
         } else if (!strcmp(argv[i], "--token") && i + 1 < argc) {
@@ -366,6 +383,34 @@ static void applyTitleOptions(void) {
     }
 }
 
+// One JSON line for the launcher: the backend whose pad a session can take, or
+// the first one asked when none can, with what it found.
+static int probe(void) {
+    const DSBBackend *answer = NULL;
+    DSBProbe found = {0};
+    size_t count = backendChosen ? 1 : sizeof(backends) / sizeof(backends[0]);
+    for (size_t b = 0; b < count; b++) {
+        const DSBBackend *candidate = backendChosen ? backend : backends[b];
+        DSBProbe p = {0};
+        int result = candidate->probe(&p);
+        if (result) {
+            return result;
+        }
+        if (!answer || (p.eligible && !found.eligible)) {
+            answer = candidate;
+            found = p;
+        }
+        if (found.eligible) {
+            break;
+        }
+    }
+    printf("{\"backend\":\"%s\",\"bluetooth\":%u,\"usb\":%u,\"eligible\":%s,"
+           "\"vendor\":\"%04x\",\"product\":\"%04x\"}\n",
+           answer->name, found.bluetooth, found.usb, found.eligible ? "true" : "false",
+           found.vendor, found.product);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         id activity = [[NSProcessInfo processInfo]
@@ -381,8 +426,11 @@ int main(int argc, char **argv) {
             return 64;
         }
         NSString *status = options.status;
-        int controllerResult = backend->open(options.probe);
-        if (controllerResult || options.probe) {
+        if (options.probe) {
+            return probe();
+        }
+        int controllerResult = backend->open();
+        if (controllerResult) {
             return controllerResult;
         }
         abilities = backend->abilities();

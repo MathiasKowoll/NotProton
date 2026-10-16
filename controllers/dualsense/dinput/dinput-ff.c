@@ -12,7 +12,7 @@
  * game is told the pad cannot vibrate and never asks.
  *
  * In a controller-bridge session (DSB_PORT set) the device objects are watched,
- * and for the Sony pad only (vendor 054c by DIPROP_VIDPID):
+ * and for the bridged pad only (DSB_VENDOR, 054c for a DualSense, by DIPROP_VIDPID):
  *   - GetCapabilities reports DIDC_FORCEFEEDBACK, and EnumObjects marks the X
  *     and Y axes as force-feedback actuators;
  *   - EnumEffects/GetEffectInfo offer constant, ramp and periodic effects;
@@ -421,25 +421,36 @@ static table *table_of(void *device)
 
 typedef HRESULT (WINAPI *getprop_fn)(void *, REFGUID, DIPROPHEADER *);
 
-/* Vendor 054c by the device's own DIPROP_VIDPID. */
-static BOOL sony(void *device)
+/* The bridged pad's vendor (DSB_VENDOR, 054c for a DualSense) by the device's
+ * own DIPROP_VIDPID. */
+static BOOL bridged_pad(void *device)
 {
+    static int vendor = -1;
     DIPROPDWORD p;
     table *t = table_of(device);
     if (!t) return FALSE;
+    if (vendor < 0)
+    {
+        char text[8];
+        int v = 0, i;
+        if (GetEnvironmentVariableA("DSB_VENDOR", text, sizeof(text)) == 4)
+            for (i = 0; i < 4 && v >= 0; i++)
+                v = hexval(text[i]) < 0 ? -1 : v << 4 | hexval(text[i]);
+        vendor = v > 0 ? v : 0x054c;
+    }
     memset(&p, 0, sizeof(p));
     p.diph.dwSize = sizeof(p);
     p.diph.dwHeaderSize = sizeof(p.diph);
     p.diph.dwHow = DIPH_DEVICE;
     if (FAILED(((getprop_fn)t->real[S_GETPROP])(device, DIPROP_VIDPID, &p.diph))) return FALSE;
-    return LOWORD(p.dwData) == 0x054c;
+    return LOWORD(p.dwData) == vendor;
 }
 
 typedef HRESULT (WINAPI *getcaps_fn)(void *, DIDEVCAPS *);
 static HRESULT WINAPI my_GetCapabilities(void *device, DIDEVCAPS *caps)
 {
     HRESULT hr = REAL(device, S_GETCAPS, getcaps_fn)(device, caps);
-    if (SUCCEEDED(hr) && caps && sony(device))
+    if (SUCCEEDED(hr) && caps && bridged_pad(device))
     {
         static LONG said;
         caps->dwFlags |= DIDC_FORCEFEEDBACK;
@@ -487,7 +498,7 @@ static HRESULT WINAPI my_EnumObjects(void *device, void *cb, void *ctx, DWORD fl
 {
     table *t = table_of(device);
     enum_ctx e = { cb, ctx, t->wide };
-    if (!cb || !sony(device)) return ((enumobj_fn)t->real[S_ENUMOBJECTS])(device, cb, ctx, flags);
+    if (!cb || !bridged_pad(device)) return ((enumobj_fn)t->real[S_ENUMOBJECTS])(device, cb, ctx, flags);
     /* Asked for actuators only: hand over the axes and mark X and Y. */
     if (flags & DIDFT_FFACTUATOR) flags = (flags & ~DIDFT_FFACTUATOR) | DIDFT_AXIS;
     return ((enumobj_fn)t->real[S_ENUMOBJECTS])(device, t->wide ? (void *)obj_cb_w : (void *)obj_cb_a, &e, flags);
@@ -498,9 +509,9 @@ typedef HRESULT (WINAPI *setprop_fn)(void *, REFGUID, const DIPROPHEADER *);
 static BOOL is_prop(REFGUID prop, REFGUID which) { return (ULONG_PTR)prop == (ULONG_PTR)which; }
 static HRESULT WINAPI my_GetProperty(void *device, REFGUID prop, DIPROPHEADER *h)
 {
-    if (h && is_prop(prop, DIPROP_FFGAIN) && sony(device)) { ((DIPROPDWORD *)h)->dwData = device_gain; return DI_OK; }
-    if (h && is_prop(prop, DIPROP_FFLOAD) && sony(device)) { ((DIPROPDWORD *)h)->dwData = 0; return DI_OK; }
-    if (h && is_prop(prop, DIPROP_AUTOCENTER) && sony(device))
+    if (h && is_prop(prop, DIPROP_FFGAIN) && bridged_pad(device)) { ((DIPROPDWORD *)h)->dwData = device_gain; return DI_OK; }
+    if (h && is_prop(prop, DIPROP_FFLOAD) && bridged_pad(device)) { ((DIPROPDWORD *)h)->dwData = 0; return DI_OK; }
+    if (h && is_prop(prop, DIPROP_AUTOCENTER) && bridged_pad(device))
     {
         ((DIPROPDWORD *)h)->dwData = DIPROPAUTOCENTER_OFF;
         return DI_OK;
@@ -510,12 +521,12 @@ static HRESULT WINAPI my_GetProperty(void *device, REFGUID prop, DIPROPHEADER *h
 
 static HRESULT WINAPI my_SetProperty(void *device, REFGUID prop, const DIPROPHEADER *h)
 {
-    if (h && is_prop(prop, DIPROP_FFGAIN) && sony(device))
+    if (h && is_prop(prop, DIPROP_FFGAIN) && bridged_pad(device))
     {
         device_gain = clampl(((const DIPROPDWORD *)h)->dwData, 0, 10000);
         return DI_OK;
     }
-    if (h && is_prop(prop, DIPROP_AUTOCENTER) && sony(device)) return DI_OK;
+    if (h && is_prop(prop, DIPROP_AUTOCENTER) && bridged_pad(device)) return DI_OK;
     return REAL(device, S_SETPROP, setprop_fn)(device, prop, h);
 }
 
@@ -555,7 +566,7 @@ static HRESULT WINAPI my_EnumEffects(void *device, void *cb, void *ctx, DWORD ty
 {
     table *t = table_of(device);
     int k;
-    if (!sony(device)) return ((enumfx_fn)t->real[S_ENUMEFFECTS])(device, cb, ctx, type);
+    if (!bridged_pad(device)) return ((enumfx_fn)t->real[S_ENUMEFFECTS])(device, cb, ctx, type);
     if (!cb) return DIERR_INVALIDPARAM;
     for (k = 0; k < (int)ARRAYSIZE(kinds); k++)
     {
@@ -577,7 +588,7 @@ static HRESULT WINAPI my_GetEffectInfo(void *device, void *info, REFGUID guid)
 {
     table *t = table_of(device);
     int k;
-    if (!sony(device)) return ((fxinfo_fn)t->real[S_GETEFFECTINFO])(device, info, guid);
+    if (!bridged_pad(device)) return ((fxinfo_fn)t->real[S_GETEFFECTINFO])(device, info, guid);
     for (k = 0; k < (int)ARRAYSIZE(kinds); k++)
         if (IsEqualGUID(guid, kinds[k].guid)) { fill_info(info, t->wide, k); return DI_OK; }
     return DIERR_DEVICENOTREG;
@@ -589,7 +600,7 @@ static HRESULT WINAPI my_CreateEffect(void *device, REFGUID guid, const DIEFFECT
 {
     int i, k;
     effect *e = NULL;
-    if (!sony(device)) return REAL(device, S_CREATEEFFECT, createfx_fn)(device, guid, p, out, outer);
+    if (!bridged_pad(device)) return REAL(device, S_CREATEEFFECT, createfx_fn)(device, guid, p, out, outer);
     if (!out) return E_POINTER;
     for (k = 0; k < (int)ARRAYSIZE(kinds); k++) if (IsEqualGUID(guid, kinds[k].guid)) break;
     if (k == (int)ARRAYSIZE(kinds))
@@ -626,7 +637,7 @@ static HRESULT WINAPI my_CreateEffect(void *device, REFGUID guid, const DIEFFECT
 typedef HRESULT (WINAPI *ffstate_fn)(void *, DWORD *);
 static HRESULT WINAPI my_GetForceFeedbackState(void *device, DWORD *state)
 {
-    if (!sony(device)) return REAL(device, S_GETFFSTATE, ffstate_fn)(device, state);
+    if (!bridged_pad(device)) return REAL(device, S_GETFFSTATE, ffstate_fn)(device, state);
     if (!state) return E_POINTER;
     *state = DIGFFS_POWERON | (actuators_on ? DIGFFS_ACTUATORSON : DIGFFS_ACTUATORSOFF);
     return DI_OK;
@@ -636,7 +647,7 @@ typedef HRESULT (WINAPI *ffcmd_fn)(void *, DWORD);
 static HRESULT WINAPI my_SendForceFeedbackCommand(void *device, DWORD cmd)
 {
     int i;
-    if (!sony(device)) return REAL(device, S_SENDFFCMD, ffcmd_fn)(device, cmd);
+    if (!bridged_pad(device)) return REAL(device, S_SENDFFCMD, ffcmd_fn)(device, cmd);
     EnterCriticalSection(&lock);
     if (cmd & (DISFFC_STOPALL | DISFFC_RESET))
         for (i = 0; i < MAX_EFFECTS; i++) if (effects[i].device == device) effects[i].playing = FALSE;
@@ -653,7 +664,7 @@ static HRESULT WINAPI my_EnumCreatedEffectObjects(void *device, LPDIENUMCREATEDE
                                                   DWORD flags)
 {
     int i;
-    if (!sony(device)) return REAL(device, S_ENUMCREATED, enumcreated_fn)(device, cb, ctx, flags);
+    if (!bridged_pad(device)) return REAL(device, S_ENUMCREATED, enumcreated_fn)(device, cb, ctx, flags);
     if (!cb) return DIERR_INVALIDPARAM;
     for (i = 0; i < MAX_EFFECTS; i++)
         if (effects[i].used && effects[i].device == device && cb(&effects[i].iface, ctx) == DIENUM_STOP) break;
@@ -706,7 +717,7 @@ static HRESULT WINAPI my_CreateDeviceW(void *di, REFGUID guid, void **out, IUnkn
     if (SUCCEEDED(hr) && out && *out)
     {
         watch_device(*out, TRUE);
-        if (sony(*out)) logf_("Sony pad opened through DirectInput (W)");
+        if (bridged_pad(*out)) logf_("the bridged pad opened through DirectInput (W)");
     }
     return hr;
 }
@@ -717,7 +728,7 @@ static HRESULT WINAPI my_CreateDeviceA(void *di, REFGUID guid, void **out, IUnkn
     if (SUCCEEDED(hr) && out && *out)
     {
         watch_device(*out, FALSE);
-        if (sony(*out)) logf_("Sony pad opened through DirectInput (A)");
+        if (bridged_pad(*out)) logf_("the bridged pad opened through DirectInput (A)");
     }
     return hr;
 }

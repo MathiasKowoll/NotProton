@@ -58,14 +58,23 @@ enum {
     DSB_CAN_READ_TRIGGERS = 4, // report the pad's trigger positions
 };
 
+// What a backend's probe found: its pads on each transport, and whether a
+// session can take one (exactly one over Bluetooth and none on a cable).
+typedef struct {
+    unsigned bluetooth, usb;
+    bool eligible;
+    uint16_t vendor, product; // the pad a session would take, 0 when none
+} DSBProbe;
+
 typedef struct {
     const char *name;
     // A flag only this backend knows, at argv[*i]; it moves *i past a value.
     // False for a flag it does not know, or a value it refuses.
     bool (*argument)(int argc, char **argv, int *i);
-    // With probe, print one JSON line describing the pads present and return 0.
-    // Otherwise open the pad. 0 on success, else the broker's exit status.
-    int (*open)(bool probe);
+    // Count this backend's pads without opening one. 0, else an exit status.
+    int (*probe)(DSBProbe *found);
+    // Open the pad a session takes. 0 on success, else the broker's exit status.
+    int (*open)(void);
     // What the opened pad can do (DSB_CAN_*).
     unsigned (*abilities)(void);
     // The pad's writer needs packets as they arrive: the run loop then wakes on
@@ -95,4 +104,5 @@ typedef struct {
     int (*stop)(NSString **state);
 } DSBBackend;
 
+// The backends a broker can run, in the order a probe asks them.
 extern const DSBBackend DSBDualSenseBackend;

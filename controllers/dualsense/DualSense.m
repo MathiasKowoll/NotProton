@@ -300,11 +300,8 @@ static bool moved(uint8_t value, uint8_t sent) {
     return value != sent && (!value || abs((int)value - (int)sent) >= 4);
 }
 
-static int openController(bool probe, IOHIDManagerRef *owner) {
+static int openController(DSBProbe *probe, IOHIDManagerRef *owner) {
     if (session.dry) {
-        if (probe) {
-            puts("{\"bluetooth\":0,\"usb\":0,\"eligible\":false}");
-        }
         return 0;
     }
     IOHIDManagerRef manager = NULL;
@@ -345,8 +342,11 @@ static int openController(bool probe, IOHIDManagerRef *owner) {
         CFRelease(devices);
     }
     if (probe) {
-        printf("{\"bluetooth\":%u,\"usb\":%u,\"eligible\":%s,\"product\":\"%04x\"}\n", bt,
-               usb, bt == 1 && !usb ? "true" : "false", bt == 1 ? dsb.product : 0);
+        *probe = (DSBProbe){.bluetooth = bt,
+                            .usb = usb,
+                            .eligible = bt == 1 && !usb,
+                            .vendor = bt == 1 ? 0x54c : 0,
+                            .product = bt == 1 ? dsb.product : 0};
         return 0;
     }
     if (bt != 1 || usb) {
@@ -427,10 +427,23 @@ static bool dualSenseArgument(int argc, char **argv, int *i) {
     return false;
 }
 
-static int dualSenseOpen(bool probe) {
+// Both models: the standard pad (054c:0ce6) and the Edge (054c:0df2).
+static int dualSenseProbe(DSBProbe *found) {
+    *found = (DSBProbe){0};
+    int result = openController(found, &manager);
+    if (dsb.hid) {
+        CFRelease(dsb.hid);
+        dsb.hid = NULL;
+    }
+    releaseControllerManager(&manager);
+    manager = NULL;
+    return result;
+}
+
+static int dualSenseOpen(void) {
     dsb.sentHistory = [NSMutableArray array];
-    int result = openController(probe, &manager);
-    if (result || probe) {
+    int result = openController(NULL, &manager);
+    if (result) {
         if (dsb.hid) {
             CFRelease(dsb.hid);
             dsb.hid = NULL;
@@ -751,6 +764,7 @@ static int dualSenseStop(NSString **state) {
 const DSBBackend DSBDualSenseBackend = {
     .name = "dualsense",
     .argument = dualSenseArgument,
+    .probe = dualSenseProbe,
     .open = dualSenseOpen,
     .abilities = dualSenseAbilities,
     .realTime = dualSenseRealTime,

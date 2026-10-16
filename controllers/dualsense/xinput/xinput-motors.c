@@ -19,8 +19,9 @@
  * with every other source. Triggers, lights and the game's own writes are not
  * touched. Without a broker session (DSB_PORT/DSB_TOKEN unset) nothing is sent.
  *
- * Only a pad whose XInputGetCapabilitiesEx names vendor 054c is forwarded, so
- * an Xbox pad's vibration never lands on the DualSense.
+ * Only a pad whose XInputGetCapabilitiesEx names the bridged pad's vendor
+ * (DSB_VENDOR, 054c for a DualSense) is forwarded, so another pad's vibration
+ * never lands on the bridged one.
  *
  * With DSB_XINPUT_PAD=1 the bridged Sony pad is also presented as an XInput
  * pad, built from its own HID input reports. The launcher sets it for a title
@@ -134,6 +135,8 @@ static BOOL broker;          /* a session is configured and the socket is open *
 /* DSB_STEAM_PAD=1: the title reads the pad through Steam Input, and its XInput
  * vibration, sent to Steam's virtual pad, goes to the bridged pad instead. */
 static BOOL steam_pad;
+/* DSB_VENDOR: the vendor of the pad the session bridges (054c for a DualSense). */
+static WORD bridged_vendor = 0x054c;
 static SOCKET sock = INVALID_SOCKET;
 static struct sockaddr_in dest;
 static uint8_t token[16];
@@ -233,8 +236,15 @@ static BOOL CALLBACK init_broker(INIT_ONCE *o, void *param, void **ctx)
     /* Distinct from the bridge's own source, which is the Unix pid. */
     source = 0x80000000u | GetCurrentProcessId();
     {
-        char flag[8];
+        char flag[8], vendor[8];
         steam_pad = GetEnvironmentVariableA("DSB_STEAM_PAD", flag, sizeof(flag)) && !strcmp(flag, "1");
+        if (GetEnvironmentVariableA("DSB_VENDOR", vendor, sizeof(vendor)) == 4)
+        {
+            int v = 0;
+            for (i = 0; i < 4 && v >= 0; i++)
+                v = hexval(vendor[i]) < 0 ? -1 : v << 4 | hexval(vendor[i]);
+            if (v > 0) bridged_vendor = (WORD)v;
+        }
     }
     broker = TRUE;
     CloseHandle(CreateThread(NULL, 0, keepalive, NULL, 0, NULL));
@@ -243,31 +253,31 @@ static BOOL CALLBACK init_broker(INIT_ONCE *o, void *param, void **ctx)
     return TRUE;
 }
 
-/* ------------------------------------------------------- which pad is Sony */
+/* ------------------------------------------------- which pad is the bridged one */
 
-static int sony[4];          /* 0 unknown, 1 Sony, -1 other */
-static DWORD sony_checked[4];
+static int bridged[4];       /* 0 unknown, 1 the bridged pad's vendor, -1 other */
+static DWORD bridged_checked[4];
 
-static BOOL is_sony(DWORD index)
+static BOOL is_bridged(DWORD index)
 {
     DWORD now = GetTickCount();
     if (index >= 4) return FALSE;
-    if (!sony[index] || now - sony_checked[index] > 5000)
+    if (!bridged[index] || now - bridged_checked[index] > 5000)
     {
         ORIG(get_caps_ex_fn, "XInputGetCapabilitiesEx");
         XCAPSEX caps;
-        int was = sony[index];
+        int was = bridged[index];
         memset(&caps, 0, sizeof(caps));
         if (p_ && p_(1, index, 0, &caps) == ERROR_SUCCESS)
-            sony[index] = caps.VendorId == 0x054c ? 1 : -1;
+            bridged[index] = caps.VendorId == bridged_vendor ? 1 : -1;
         else
-            sony[index] = -1;
-        sony_checked[index] = now;
-        if (sony[index] != was)
+            bridged[index] = -1;
+        bridged_checked[index] = now;
+        if (bridged[index] != was)
             logf_("pad %lu: vendor %04x product %04x -> %s", index, caps.VendorId, caps.ProductId,
-                  sony[index] > 0 ? "Sony, vibration goes to the broker" : "not ours");
+                  bridged[index] > 0 ? "the bridged pad, vibration goes to the broker" : "not ours");
     }
-    return sony[index] > 0;
+    return bridged[index] > 0;
 }
 
 /* ------------------------------------------------- the pad as XInput pad */
@@ -439,7 +449,7 @@ static void pad_state(XSTATE *state, BOOL guide)
 
 static BOOL CALLBACK init_pad(INIT_ONCE *o, void *param, void **ctx)
 {
-    char flag[8], product[8];
+    char flag[8], product[8], device[32];
     ORIG(get_state_fn, "XInputGetState");
     XSTATE probe;
     int i;
@@ -449,6 +459,13 @@ static BOOL CALLBACK init_pad(INIT_ONCE *o, void *param, void **ctx)
     if (!GetEnvironmentVariableA("DSB_XINPUT_PAD", flag, sizeof(flag)) || strcmp(flag, "1"))
     {
         logf_("pad as XInput: off (DSB_XINPUT_PAD %s)", GetEnvironmentVariableA("DSB_XINPUT_PAD", NULL, 0) ? flag : "unset");
+        return TRUE;
+    }
+    /* The pad is built from a DualSense's own input reports; another backend's
+     * pad reaches XInput through wine. */
+    if (GetEnvironmentVariableA("DSB_DEVICE", device, sizeof(device)) && strcmp(device, "dualsense"))
+    {
+        logf_("pad as XInput: off (DSB_DEVICE %s builds no XInput pad here)", device);
         return TRUE;
     }
     if (GetEnvironmentVariableA("DSB_PRODUCT", product, sizeof(product)) == 4
@@ -538,7 +555,7 @@ DWORD WINAPI XInputSetState(DWORD index, XVIB *vib)
     r = p_ ? p_(index, vib) : ERROR_DEVICE_NOT_CONNECTED;
     if (InterlockedIncrement(&calls) == 1)
         logf_("XInputSetState(%lu) first call -> %lu", index, r);
-    if (broker && vib && r == ERROR_SUCCESS && (steam_pad || is_sony(index)))
+    if (broker && vib && r == ERROR_SUCCESS && (steam_pad || is_bridged(index)))
     {
         static LONG nonzero;
         if ((vib->wLeftMotorSpeed || vib->wRightMotorSpeed) && InterlockedIncrement(&nonzero) == 1)

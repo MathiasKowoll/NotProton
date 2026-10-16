@@ -112,7 +112,7 @@ func main() throws -> Int32 {
 
     var brokerEnvironment = environment
     brokerEnvironment.removeValue(forKey: "DYLD_INSERT_LIBRARIES")
-    func probe() throws -> (eligible: Bool, usb: Int, product: String) {
+    func probe() throws -> (eligible: Bool, usb: Int, product: String, backend: String, vendor: String) {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = root.appendingPathComponent("broker")
@@ -125,10 +125,14 @@ func main() throws -> Int32 {
         guard let eligible = state["eligible"] as? Bool, let usb = state["usb"] as? Int,
             state["bluetooth"] is Int
         else { throw LaunchError("Incomplete controller probe") }
-        // An older broker says nothing about the model: that was a standard pad.
-        return (eligible, usb, state["product"] as? String ?? "0ce6")
+        // An older broker names neither the backend nor the model: that was a
+        // standard DualSense.
+        return (
+            eligible, usb, state["product"] as? String ?? "0ce6",
+            state["backend"] as? String ?? "dualsense", state["vendor"] as? String ?? "054c"
+        )
     }
-    var state: (eligible: Bool, usb: Int, product: String)?
+    var state: (eligible: Bool, usb: Int, product: String, backend: String, vendor: String)?
     var probeError: Error?
     for attempt in 0..<3 {
         do {
@@ -238,7 +242,10 @@ func main() throws -> Int32 {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = root.appendingPathComponent("broker")
-        var arguments = ["--token", token, "--parent", String(getpid()), "--status", stats.path]
+        var arguments = [
+            "--backend", state.backend, "--token", token, "--parent", String(getpid()),
+            "--status", stats.path,
+        ]
         if pcm { arguments.append("--pcm") }
         if let port { arguments += ["--port", String(port)] }
         if rumbleHaptics { arguments.append("--rumble-haptics") }
@@ -258,9 +265,15 @@ func main() throws -> Int32 {
         }
         return assigned
     }
-    // The model the game sees. An Edge stays an Edge unless the title's Sony
-    // library knows only the standard pad (NOTPROTON_PAD_AS=dualsense).
-    let presentAsStandard = environment["NOTPROTON_PAD_AS"] == "dualsense" && state.product == "0df2"
+    // The pad the session bridges, for the pieces inside Wine: which backend
+    // drives it, and the vendor and model the game sees. An Edge stays an Edge
+    // unless the title's Sony library knows only the standard pad
+    // (NOTPROTON_PAD_AS=dualsense).
+    let presentAsStandard =
+        state.backend == "dualsense" && environment["NOTPROTON_PAD_AS"] == "dualsense"
+        && state.product == "0df2"
+    environment["DSB_DEVICE"] = state.backend
+    environment["DSB_VENDOR"] = state.vendor
     environment["DSB_PRODUCT"] = presentAsStandard ? "0ce6" : state.product
     if presentAsStandard {
         fputs("DualSense launch: Edge presented as a standard DualSense (NOTPROTON_PAD_AS=dualsense)\n", stderr)
@@ -282,7 +295,10 @@ func main() throws -> Int32 {
                 "started": Date().timeIntervalSince1970,
                 "prefix": (environment["STEAM_COMPAT_DATA_PATH"] ?? "") + "/pfx",
                 "environment": environment.filter {
-                    ["DSB_PORT", "DSB_TOKEN", "DSB_RAW", "DSB_LIBRARY", "DSB_PCM", "DSB_PRODUCT"]
+                    [
+                        "DSB_PORT", "DSB_TOKEN", "DSB_RAW", "DSB_LIBRARY", "DSB_PCM", "DSB_DEVICE",
+                        "DSB_VENDOR", "DSB_PRODUCT",
+                    ]
                         .contains($0.key)
                 },
             ], to: info)

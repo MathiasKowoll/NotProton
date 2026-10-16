@@ -31,7 +31,10 @@ from pathlib import Path
 
 if '--probe' in sys.argv:
     usb = int(os.environ.get('TEST_USB', '0'))
-    print(json.dumps(dict(bluetooth=0 if usb else 1, usb=usb, eligible=not usb)), flush=True)
+    found = dict(bluetooth=0 if usb else 1, usb=usb, eligible=not usb)
+    if os.environ.get('TEST_BACKEND'):
+        found.update(backend=os.environ['TEST_BACKEND'], vendor='045e', product='0b13')
+    print(json.dumps(found), flush=True)
     sys.exit()
 Path(__file__).with_name('broker-args.json').write_text(json.dumps(sys.argv[1:]))
 if os.environ.get('TEST_BAD_READY'):
@@ -57,7 +60,7 @@ import os
 import sys
 import time
 
-keys = ('DSB_RAW', 'DSB_PCM', 'DSB_LIBRARY', 'DSB_SESSION')
+keys = ('DSB_RAW', 'DSB_PCM', 'DSB_LIBRARY', 'DSB_SESSION', 'DSB_DEVICE', 'DSB_VENDOR', 'DSB_PRODUCT')
 print(json.dumps({k: os.environ.get(k) for k in keys}), flush=True)
 time.sleep(float(os.environ.get('TEST_CHILD_SLEEP', '0')))
 sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
@@ -80,6 +83,9 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
         if route == "pcm":
             assert observed["DSB_RAW"] == "1:pcm" and observed["DSB_PCM"] == "1", observed
             assert observed["DSB_LIBRARY"] == str(root / "bridge.dylib")
+            # A probe that names no backend is an older broker's: a standard DualSense.
+            assert (observed["DSB_DEVICE"], observed["DSB_VENDOR"], observed["DSB_PRODUCT"]) == (
+                "dualsense", "054c", "0ce6"), observed
         else:
             assert observed["DSB_RAW"] is None and observed["DSB_LIBRARY"] is None
             assert json.loads((root / "sessions/999999-status.json").read_text())["route"] == route
@@ -126,6 +132,24 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
         if extra.get("DSB_PCM") == "0":
             assert "--pcm" not in passed, passed
     print("  ok    dualsense launcher: per-title feedback options", flush=True)
+
+    # The backend the probe names is the one the broker runs, and the pieces in
+    # Wine learn which pad it is; the Edge-as-standard choice is the DualSense's.
+    for backend, extra, device in [
+        ("", {}, ("dualsense", "054c", "0ce6")),
+        ("xbox", {"NOTPROTON_PAD_AS": "dualsense"}, ("xbox", "045e", "0b13")),
+    ]:
+        env = dict(clean, NOTPROTON_RAW_CONTROLLERS="1", TEST_BACKEND=backend, **extra)
+        recorded = root / "broker-args.json"
+        recorded.unlink(missing_ok=True)
+        result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=12)
+        assert result.returncode == 0, (backend, result.stderr)
+        passed = json.loads(recorded.read_text())
+        assert passed[passed.index("--backend") + 1] == device[0], passed
+        observed = json.loads(result.stdout.splitlines()[-1])
+        assert (observed["DSB_DEVICE"], observed["DSB_VENDOR"], observed["DSB_PRODUCT"]) == device, (
+            backend, observed)
+    print("  ok    dualsense launcher: the probe's backend runs, and Wine learns which pad", flush=True)
 
     env = dict(clean, NOTPROTON_RAW_CONTROLLERS="1")
     result = subprocess.run(

@@ -1691,6 +1691,8 @@ set -- \
   --env DSB_SESSION="${DSB_SESSION:-}" \
   --env DSB_LIBRARY="${DSB_LIBRARY:-}" \
   --env DSB_PORT="${DSB_PORT:-}" \
+  --env DSB_DEVICE="${DSB_DEVICE:-}" \
+  --env DSB_VENDOR="${DSB_VENDOR:-}" \
   --env DSB_PRODUCT="${DSB_PRODUCT:-}" \
   --env DSB_TOKEN="${DSB_TOKEN:-}" \
   --env DSB_RAW="${DSB_RAW:-}" \

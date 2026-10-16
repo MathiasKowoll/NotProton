@@ -175,9 +175,16 @@ another pad needs the same rule.
 
 ### Naming
 
-- The launcher passes the backend to the pieces as `DSB_DEVICE`, plus `DSB_VENDOR`
-  and `DSB_PRODUCT` (`DSB_PRODUCT` exists today). The pieces' vendor gates read
-  them instead of `054c`.
+- Built in step 3:
+  - `broker --probe` asks each backend in turn. It prints the first one that can
+    take a session (or the first one asked) as one JSON line with `backend`,
+    `vendor` and `product`.
+  - The launcher starts the broker with `--backend <name>`, and passes
+    `DSB_DEVICE`, `DSB_VENDOR` and `DSB_PRODUCT` to the pieces inside Wine.
+  - The XInput and DirectInput pieces forward vibration for the pad whose vendor
+    is `DSB_VENDOR`.
+  - The XInput pad built from a DualSense's reports is presented only when
+    `DSB_DEVICE` is `dualsense`.
 - The user-facing options keep their names:
   - `NOTPROTON_PAD_RUMBLE=haptics` means "the pad's fine haptics": voice coils on
     a DualSense, HD rumble on a Switch pad.
@@ -233,7 +240,7 @@ Every step keeps the DualSense working. Each runs `make dualsense-check` and
    - This is a refactor: every existing test must pass unchanged.
    - Dry runs gain a `dry` backend that records calls, so the core's tests stop
      reading Sony bytes.
-3. **Choose the backend.** The probe reports `DSB_DEVICE`; the launcher passes it,
+3. **Choose the backend.** *Done.* The probe reports `DSB_DEVICE`; the launcher passes it,
    with vendor and product, to the broker and the pieces, whose vendor gates read
    it.
    - Tests: `test-launch.py` cases for the environment.
