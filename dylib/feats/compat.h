@@ -59,6 +59,11 @@ int  np_compat_load_tool_list(const char *path, const char *tools_dir);
 // NULL when there are none. Loaded with the tool list.
 const char *np_compat_runner_options_json(void);
 
+// suggested-options.json in Application Support, for the options panel: launch
+// options per Steam app id that replace the built-in suggestions without a rebuild.
+// NULL when there is none. Loaded with the tool list.
+const char *np_compat_suggested_options_json(void);
+
 // Writes a directory for every tool in the app's list and removes the directories of tools
 // no longer in it.
 int  np_compat_ensure_tool_manifest(void);

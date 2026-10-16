@@ -54,6 +54,7 @@ TEST_CC     := $(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -std=c17 -g \
 
 GENERATED_DIR := $(OUT_DIR)/generated
 RUN_SCRIPT_H  := $(GENERATED_DIR)/compat_run.h
+SUGGESTED_OPTIONS_H := $(GENERATED_DIR)/suggested_options.h
 CFLAGS += -I$(GENERATED_DIR)
 
 ARM64_DYLIB := $(OUT_DIR)/notproton.arm64.dylib
@@ -259,9 +260,9 @@ peicon-fixtures:
 GATECHECK         := $(OUT_DIR)/gatecheck
 WEBPATCH_FIXTURES := dylib/tests/webpatch-fixtures
 
-$(GATECHECK): dylib/tests/gatecheck.c dylib/feats/webpatch.c dylib/feats/webpatch.h
+$(GATECHECK): dylib/tests/gatecheck.c dylib/feats/webpatch.c dylib/feats/webpatch.h $(SUGGESTED_OPTIONS_H)
 	@mkdir -p $(dir $@)
-	$(TEST_CC) -O1 -o $@ dylib/tests/gatecheck.c
+	$(TEST_CC) -O1 -I$(GENERATED_DIR) -o $@ dylib/tests/gatecheck.c
 
 webpatch-fixtures:
 	@if [ ! -d $(WEBPATCH_FIXTURES) ] || [ ! -f dylib/tests/gatecheck.c ]; then \
@@ -345,12 +346,13 @@ app-tests:
 
 PANEL_TESTS := dylib/tests/panel-behavior
 
-panel-behavior:
+panel-behavior: $(SUGGESTED_OPTIONS_H)
 	@if [ ! -d $(PANEL_TESTS) ]; then $(call SKIP,panel-behavior,$(PANEL_TESTS)); exit 0; fi; \
+	python3 dylib/tests/suggested-options-check.py && \
 	if ! command -v node >/dev/null 2>&1; then \
 		echo "==> panel-behavior: node not found, skipped"; exit 0; fi; \
 	mkdir -p $(OUT_DIR) && \
-	$(TEST_CC) -O1 -o $(OUT_DIR)/panel-emit \
+	$(TEST_CC) -O1 -I$(GENERATED_DIR) -o $(OUT_DIR)/panel-emit \
 	  $(PANEL_TESTS)/emit.c && \
 	node $(PANEL_TESTS)/behavior.js $(OUT_DIR)/panel-emit && \
 	node $(PANEL_TESTS)/switching.js $(OUT_DIR)/panel-emit && \
@@ -360,6 +362,8 @@ panel-behavior:
 	node $(PANEL_TESTS)/localization.js $(OUT_DIR)/panel-emit && \
 	node $(PANEL_TESTS)/fex.js $(OUT_DIR)/panel-emit && \
 	node $(PANEL_TESTS)/runner-options.js $(OUT_DIR)/panel-emit && \
+	node $(PANEL_TESTS)/controllers.js $(OUT_DIR)/panel-emit && \
+	node $(PANEL_TESTS)/suggested.js $(OUT_DIR)/panel-emit && \
 	echo "==> panel behavior: renders as expected, no stale arguments"
 
 CX_ROOT ?= /Applications/CrossOver Preview.app
@@ -401,6 +405,12 @@ $(RUN_SCRIPT_H): dylib/feats/compat_run.sh dylib/embed_script.py
 	python3 dylib/embed_script.py $< $@ RUN_SCRIPT
 
 $(OUT_DIR)/dylib/feats/compat.o: $(RUN_SCRIPT_H)
+
+$(SUGGESTED_OPTIONS_H): dylib/feats/suggested-options.json dylib/embed_options.py
+	@mkdir -p $(GENERATED_DIR)
+	python3 dylib/embed_options.py $< $@ NP_SUGGESTED_OPTIONS
+
+$(OUT_DIR)/dylib/feats/webpatch.o: $(SUGGESTED_OPTIONS_H)
 
 SUPPORT_DIR        := $(HOME)/Library/Application Support/notproton
 OVERLAY_SHIM_SRC   := overlay-shim/overlay_shim.m

@@ -18,6 +18,9 @@ understand is not passed on, a spec the broker does not understand ends it
 with status 64, and `--rumble-haptics` without the PCM transport is declined
 by the broker.
 
+Steam's Compatibility page sets both, with the other pad options, from the
+Controllers section once direct access is on (see "The panel" below).
+
 ## Rumble on the voice coils
 
 The broker's session loop already folds every source's motor values into one
@@ -111,6 +114,48 @@ A session that ends because the Bluetooth link stalled cannot release the
 effects; they then stay on the pad until the next session writes them, or the
 pad reconnects.
 
+## The panel
+
+With "Let games read controllers directly" on, the Controllers section of the
+Compatibility page shows the bridged pad's options and writes each as a
+launch option:
+
+| Row | Launch option |
+|---|---|
+| Controller the game sees: automatic, Xbox, PlayStation | `NOTPROTON_PAD_XINPUT` unset, `1`, `0` |
+| Controller the game sees: Steam Input's controller | `NOTPROTON_PAD_STEAM_INPUT=1` (and the override cleared) |
+| Show a DualSense Edge as a standard DualSense | `NOTPROTON_PAD_AS=dualsense` |
+| Vibration: motors or haptic actuators | `NOTPROTON_PAD_RUMBLE` unset or `haptics` |
+| R2 effect, L2 effect: an effect and "While the other is pressed", each with a strength | one `NOTPROTON_PAD_TRIGGERS` value for both |
+
+With direct access off, the section instead offers "Vibration through Steam
+Input", on by default, which writes `NOTPROTON_STEAM_RUMBLE=0` when turned off.
+
+Under each section a line says what the current choice does, and changes with
+it: which pad the game sees, where rumble plays, and for a trigger its effect
+with the other trigger up and while it is pressed.
+
+Above the other sections, a game listed in `dylib/feats/suggested-options.json`
+gets "Suggested for this game": one switch that writes every launch option
+measured for it (on) or removes them (off). Each entry names what was measured
+and when; `dylib/embed_options.py` refuses at build time an entry the panel
+could not write back unquoted, a variable outside NotProton's, the bridge's,
+graphics and Rosetta options, or a trigger spec the launcher would refuse.
+Steam settings that are not launch options, such as Steam Input, go in the
+entry's summary.
+
+The same file in `~/Library/Application Support/notproton/` replaces the
+built-in entry for each game it names, and adds games, without a rebuild. The
+dylib reads it with the runner options when Steam starts, so a change shows
+after a Steam restart. The page uses an entry only if it has a summary and
+options the build would accept (the same variables, values the panel writes
+unquoted); anything else in the file, or a file that is not JSON, leaves the
+built-in suggestions as they are.
+
+The panel reads the older names back as resistance and composes only
+canonical specs. A value the launcher would refuse reads as the game's own on
+both sides, since the launcher drops it whole.
+
 ## Tests
 
 `make dualsense-check` covers:
@@ -141,6 +186,11 @@ pad reconnects.
     L2 is pressed and comes back exactly; L2's rumble gives way to resistance
     while R2 is pressed and resumes from the motor's current value.
   - The option is declined without PCM, and an unknown effect is refused.
+
+`make panel-behavior` runs `dylib/tests/panel-behavior/controllers.js`: the
+rows appear only with direct access, each writes and reads back its launch
+option, every trigger value the panel composes matches the broker's grammar,
+and each trigger's line follows its choices.
 
 On a pad, check these three:
 

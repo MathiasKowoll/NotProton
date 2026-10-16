@@ -21,6 +21,11 @@ void np_webpatch_set_fex_tools(const char *const *names, size_t count);
 // this thread. The string must outlive the transform. NULL means none.
 void np_webpatch_set_runner_options(const char *json);
 
+// Sets the suggested launch options read at Steam start, as JSON keyed by Steam app
+// id, for this thread. They replace the built-in suggestion for each game they name.
+// The string must outlive the transform. NULL means none.
+void np_webpatch_set_suggested_options(const char *json);
+
 // The compat UIs, named so a caller can compare against the table rather than a literal
 // of its own that a rename would leave behind. forcetool calls SpecifyCompatTool straight
 // out; selecttool reads its list from the CompatManager routes.

@@ -26,12 +26,16 @@ const FORMS = {
 
 // `fallback` and `fexTools` stand in for what the hook sets before the transform, and
 // the runner options byte expands to what the dylib pastes for `options`, so a check
-// sees the page with the runner options the app would have written.
+// sees the page with the runner options the app would have written. `suggested` is
+// the text of the suggested options file in Application Support.
 function panel(emit, form, globals = { document: { documentElement: { lang: 'en' } } },
-               { fallback = 'notproton', fexTools = [], names = ['R0', 'B0'], options = {} } = {}) {
+               { fallback = 'notproton', fexTools = [], names = ['R0', 'B0'], options = {},
+                 suggested = '{}' } = {}) {
   const pasted = execFileSync(emit, ['runner-options', JSON.stringify(options)], { encoding: 'utf8' });
+  // The suggested options file is pasted the same way, as the text the file holds.
+  const file = execFileSync(emit, ['runner-options', suggested], { encoding: 'utf8' });
   const raw = execFileSync(emit, [form, fallback, ...fexTools], { encoding: 'utf8' }).trim()
-    .replace(/\u0017/g, () => pasted);
+    .replace(/\u0017/g, () => pasted).replace(/\u0018/g, () => file);
   const f = FORMS[form];
   const body = expand(raw, { [f.react]: names[0], [f.barrel]: names[1] });
   const src = form === 'component' ? 'var ' + body.replace(/,$/, '') : body.replace(/;$/, '');

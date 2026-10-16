@@ -446,6 +446,34 @@ const char *np_compat_runner_options_json(void) {
     return g_runner_options;
 }
 
+// Suggested launch options that replace the built-in ones, game by game, without a
+// rebuild. The page checks each entry; the file only has to be text.
+static char *g_suggested_options;
+
+static void load_suggested_options(const char *home) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/Library/Application Support/notproton/suggested-options.json",
+             home);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char *buf = malloc(RUNNER_OPTIONS_MAX + 1);
+    size_t n = buf ? fread(buf, 1, RUNNER_OPTIONS_MAX + 1, f) : 0;
+    fclose(f);
+    if (n == 0 || n > RUNNER_OPTIONS_MAX || memchr(buf, '\0', n)) {
+        NP_WARN("load_suggested_options: %s is empty, too large or not text, so only the "
+                "built-in suggestions are offered", path);
+        free(buf);
+        return;
+    }
+    buf[n] = '\0';
+    g_suggested_options = buf;
+}
+
+const char *np_compat_suggested_options_json(void) {
+    load_tool_list_once();
+    return g_suggested_options;
+}
+
 static void load_tool_list(void) {
     const char *home = np_home_dir();
     char tools_dir[512];
@@ -455,6 +483,7 @@ static void load_tool_list(void) {
     snprintf(path, sizeof(path), "%s/Library/Application Support/notproton/tools", home);
     np_compat_load_tool_list(path, tools_dir);
     load_runner_options(home);
+    load_suggested_options(home);
 }
 
 static void load_tool_list_once(void) {

@@ -1,0 +1,244 @@
+{
+  "601150": {
+    "title": "Devil May Cry 5",
+    "summary": "Direct controller access through an Xbox controller, rumble through the bridge (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器，以 Xbox 控制器呈现，震动经由桥接（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: the XInput pad: control and rumble. Steam Input without direct access also works."
+  },
+  "883710": {
+    "title": "Resident Evil 2",
+    "summary": "Direct controller access through an Xbox controller, rumble through the bridge (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器，以 Xbox 控制器呈现，震动经由桥接（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: the XInput pad: full control, rumble on the motors (peaks 0.70)."
+  },
+  "952060": {
+    "title": "Resident Evil 3",
+    "summary": "Direct controller access through an Xbox controller, rumble through the bridge (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器，以 Xbox 控制器呈现，震动经由桥接（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: the XInput pad: full control, rumble on the motors (peaks 0.70)."
+  },
+  "1448440": {
+    "title": "Wo Long: Fallen Dynasty",
+    "summary": "Turn Steam Input on and leave direct controller access off: the game reads the controller only through Steam Input",
+    "summary_zh": "请开启 Steam Input 并关闭直接读取：游戏只通过 Steam Input 读取控制器",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "0"
+    },
+    "measured": "2026-10-15, pr90.14: the game reads Steam Input; its rumble reaches Steam's virtual pad through XInput and the Steam rumble adapter. It reads neither XInput nor the Sony pad, so direct access gives it nothing."
+  },
+  "1593500": {
+    "title": "God of War",
+    "summary": "Direct controller access, DualSense Edge shown as a standard DualSense",
+    "summary_zh": "允许直接读取控制器，将 DualSense Edge 显示为标准 DualSense",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1",
+      "NOTPROTON_PAD_AS": "dualsense"
+    },
+    "measured": "2026-10-16, pr90.23: its libScePad does not know the Edge; as a standard DualSense the game drives the pad itself: rumble on the motors (7,415 commands, peaks 0.98 and 1.0) and the lightbar. It sets no trigger effects."
+  },
+  "1649240": {
+    "title": "Returnal",
+    "summary": "Direct controller access: the game drives the DualSense itself; turn Adaptive Triggers on in the game's options (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense；请在游戏选项中开启自适应扳机（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: haptics through the audio output and adaptive triggers, once Adaptive Triggers is turned on in the game's options (off by default)."
+  },
+  "1971870": {
+    "title": "Mortal Kombat 1",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: rumble on the motors, fatalities included (406 commands, peaks 0.50)."
+  },
+  "2001760": {
+    "title": "Beast of Reincarnation",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: haptics through the bridge's audio output, found by its ContainerId."
+  },
+  "2096600": {
+    "title": "Crysis 2 Remastered",
+    "summary": "Direct controller access through an Xbox controller, rumble through the bridge (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器，以 Xbox 控制器呈现，震动经由桥接（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: the XInput pad: full control, both motors at full (2,264 commands)."
+  },
+  "2096610": {
+    "title": "Crysis 3 Remastered",
+    "summary": "Direct controller access through an Xbox controller, rumble through the bridge (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器，以 Xbox 控制器呈现，震动经由桥接（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: the XInput pad: full control, both motors reached the bridge."
+  },
+  "2108330": {
+    "title": "F1 23",
+    "summary": "Direct controller access, DualSense Edge shown as a standard DualSense",
+    "summary_zh": "允许直接读取控制器，将 DualSense Edge 显示为标准 DualSense",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1",
+      "NOTPROTON_PAD_AS": "dualsense"
+    },
+    "measured": "2026-10-15: as an Edge the game assigned no buttons (\"No preset control scheme\"); as a standard DualSense full control, haptics and trigger effects."
+  },
+  "2124490": {
+    "title": "SILENT HILL 2",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: haptics through the audio output (24,801 blocks, 1,737 reports) and adaptive triggers on both sides."
+  },
+  "2215430": {
+    "title": "Ghost of Tsushima DIRECTOR'S CUT",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15, pr90.9: rumble on the motors (4,225 commands) and trigger effects on both triggers."
+  },
+  "2322010": {
+    "title": "God of War Ragnarok",
+    "summary": "Turn Steam Input on: PlayStation buttons through Steam Input, rumble on the haptic actuators through an Xbox controller, R2 heavier along the pull while L2 aims, L2 vibrating",
+    "summary_zh": "请开启 Steam Input：经由 Steam Input 显示 PlayStation 按键，震动通过 Xbox 控制器交给触觉致动器，按住 L2 瞄准时 R2 越按越重，L2 持续振动",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1",
+      "NOTPROTON_PAD_XINPUT": "1",
+      "NOTPROTON_PAD_RUMBLE": "haptics",
+      "NOTPROTON_PAD_TRIGGERS": "R2:slope+L2,L2:vibrate"
+    },
+    "measured": "2026-10-16, pr90.24: under Wine the game skips the PlayStation PC SDK and never vibrates through Steam Input. With Steam Input on it reads the controls and shows PlayStation buttons through Steam Input, and sends its rumble to the XInput pad (755 commands, 1,069 haptic reports, no errors). R2's slope followed L2 (28 presses and releases), L2 vibrated throughout, both released at exit; the user felt both. Controls did not double."
+  },
+  "2384580": {
+    "title": "DYNASTY WARRIORS: ORIGINS",
+    "summary": "Turn Steam Input on and leave direct controller access off: the game reads the controller only through Steam Input",
+    "summary_zh": "请开启 Steam Input 并关闭直接读取：游戏只通过 Steam Input 读取控制器",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "0"
+    },
+    "measured": "2026-10-15: the game reads the controller only through Steam Input and never calls XInput; Steam sends the rumble to the pad itself."
+  },
+  "2464280": {
+    "title": "Tormented Souls 2",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: rumble on the motors through SDL (250 writes, peaks 0.51), no errors."
+  },
+  "2492670": {
+    "title": "METAL GEAR SOLID 4",
+    "summary": "Xbox controller (turn Steam Input off)",
+    "summary_zh": "Xbox 控制器（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1",
+      "NOTPROTON_PAD_XINPUT": "1"
+    },
+    "measured": "2026-10-15: without the override the game sees no controller; with it, control and both motors."
+  },
+  "2584270": {
+    "title": "Mortal Shell II",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15, pr90.8: 17,244 commands, peaks 1.0 and 1.0, no errors."
+  },
+  "2624870": {
+    "title": "Life is Strange: Reunion",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: rumble on the motors through SDL, peaks 1.0 and 1.0, no errors."
+  },
+  "2627260": {
+    "title": "NINJA GAIDEN 4",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: the Sony route through the bridge; rumble on the motors (1,803 commands, peaks 0.96)."
+  },
+  "2638890": {
+    "title": "Onimusha: Way of the Sword",
+    "summary": "Direct controller access through an Xbox controller, rumble through the bridge (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器，以 Xbox 控制器呈现，震动经由桥接（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15, pr90.7: the bridge's XInput pad (the store page lists no PS5 controller support): full control and rumble."
+  },
+  "2651280": {
+    "title": "Marvel's Spider-Man 2",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: haptics through the bridge's audio output, found by its ContainerId."
+  },
+  "2713000": {
+    "title": "Resonance: A Plague Tale Legacy",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15, pr90.10: haptics through the bridge's audio output (15,358 blocks, 783 reports)."
+  },
+  "2787320": {
+    "title": "Revenge of the Savage Planet",
+    "summary": "Xbox controller (turn Steam Input off)",
+    "summary_zh": "Xbox 控制器（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1",
+      "NOTPROTON_PAD_XINPUT": "1"
+    },
+    "measured": "2026-10-15: control and rumble through the XInput pad; Xbox button glyphs."
+  },
+  "3357650": {
+    "title": "PRAGMATA",
+    "summary": "Direct controller access without the bridge: the game drives the pad itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器但不使用桥接：由游戏自行驱动手柄（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1",
+      "DSB_DISABLED": "1"
+    },
+    "measured": "2026-10-15: the game handles the pad over Bluetooth itself; rumble and trigger resistance. With the bridge it did not vibrate."
+  },
+  "3669870": {
+    "title": "CONTROL Resonant",
+    "summary": "Direct controller access: the game drives the DualSense itself (turn Steam Input off)",
+    "summary_zh": "允许直接读取控制器：由游戏自行驱动 DualSense（请关闭 Steam Input）",
+    "options": {
+      "NOTPROTON_RAW_CONTROLLERS": "1"
+    },
+    "measured": "2026-10-15: haptics through the bridge's audio output, found by its ContainerId."
+  }
+}

@@ -21,7 +21,7 @@ for (const form of Object.keys(FORMS)) {
        'a shortcut renders the panel before a tool name reaches the page');
 
   let r = nodes('');
-  t.ok(toggles(r).length === 6 && sections(r).length === 3, 'automatic shows six toggles in three sections');
+  t.ok(toggles(r).length === 7 && sections(r).length === 3, 'automatic shows seven toggles in three sections');
   t.ok(r.filter(x => x.type === 'Dropdown').length === 2, 'two dropdowns');
   t.ok(!('label' in r.find(x => x.type === 'Dropdown').props), 'the backend dropdown carries no label column');
 
@@ -79,7 +79,7 @@ for (const form of Object.keys(FORMS)) {
   const root = P({ details: details('') });
   t.ok(root.props.className === 'MSCXPanel', 'the panel root carries its own class');
   const classes = nodes('').filter(x => x.type === 'Toggle').map(x => x.props.className);
-  t.ok(classes.length === 6 && classes.every(c => c === 'MSCXRow'), 'every checkbox carries the row class');
+  t.ok(classes.length === 7 && classes.every(c => c === 'MSCXRow'), 'every checkbox carries the row class');
   const raw = o => nodes(o).find(x => x.props.label === 'Let games read controllers directly');
   t.ok(sections(nodes('')).includes('Controllers') && raw('').props.checked === false,
        'controller hiding is on unless the game says otherwise');

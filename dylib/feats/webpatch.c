@@ -1,6 +1,7 @@
 // Enables Steam Play in the UI/enables the Compatibility tab in game properties
 #include "webpatch.h"
 #include "../util/log.h"
+#include "suggested_options.h" // NP_SUGGESTED_OPTIONS, generated from suggested-options.json
 
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,12 @@ static _Thread_local char g_fex_tools[NP_WEBPATCH_FEX_TOOLS_MAX * (NP_TOOL_NAME_
 #define NP_RUNNER_OPTIONS "\027"
 
 static _Thread_local const char *g_runner_options = "{}";
+
+// Stands for the suggested launch options read at Steam start, pasted in the same
+// way; they replace the built-in suggestion for each game they name.
+#define NP_SUGGESTED_FILE "\030"
+
+static _Thread_local const char *g_suggested_file = "{}";
 
 typedef struct {
     const char *find;
@@ -99,6 +106,10 @@ void np_webpatch_set_runner_options(const char *json) {
     g_runner_options = json ? json : "{}";
 }
 
+void np_webpatch_set_suggested_options(const char *json) {
+    g_suggested_file = json ? json : "{}";
+}
+
 static size_t match_at(const char *src, size_t len, size_t pos,
                        const char *find, np_cap_t *caps) {
     for (int i = 0; i < NP_CAP_MAX; i++) { caps[i].at = NULL; caps[i].len = 0; }
@@ -116,7 +127,7 @@ static size_t match_at(const char *src, size_t len, size_t pos,
             continue;
         }
         // Whatever options were pasted, so a patched chunk is still recognised as one.
-        if (*f == NP_RUNNER_OPTIONS[0]) {
+        if (*f == NP_RUNNER_OPTIONS[0] || *f == NP_SUGGESTED_FILE[0]) {
             if (s + 12 > len || memcmp(src + s, "JSON.parse(\"", 12) != 0) return 0;
             s += 12;
             while (s < len && src[s] != '"') s += src[s] == '\\' ? 2 : 1;
@@ -200,6 +211,10 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
         }
         if (*r == NP_RUNNER_OPTIONS[0]) {
             if (!out_json_string(o, g_runner_options)) return 0;
+            continue;
+        }
+        if (*r == NP_SUGGESTED_FILE[0]) {
+            if (!out_json_string(o, g_suggested_file)) return 0;
             continue;
         }
         int ci = cap_index((unsigned char)*r);
@@ -296,7 +311,137 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
     ".MSCXPanel .MSCXRow{display:flex;flex-direction:row;padding:9px;margin:0;" \
     "color:#dfe3e6;background:rgba(59,63,72,.5);border-radius:3px}" \
     ".MSCXPanel .MSCXRow:hover{box-shadow:0 6px 8px 0 rgba(0,0,0,.16)}" \
+    ".MSCXPanel .MSCXHint{color:#8b929a;font-size:12px;line-height:16px;padding:4px 9px 10px}" \
     ".MSCXNoBottomGap{margin-bottom:0}\""
+
+// The bridged pad's options, shown while games read controllers directly:
+// which pad the game sees, where rumble plays, and an effect and strength per
+// trigger and a second one for while the other trigger is pressed, each with a
+// line saying what it does. NOTPROTON_PAD_TRIGGERS holds both triggers
+// ("R2:resist@2,R2:weapon@8+L2,L2:slope"); the older names light, medium and
+// strong read as resistance at 2, 4 and 6. A value the launcher would refuse
+// reads as the game's own on both sides, as the launcher leaves it.
+#define NP_CX_CONTROLLER_DECLS(RT, BARREL) \
+    "npRaw=\"1\"===g(\"NOTPROTON_RAW_CONTROLLERS\"),npH=x=>(0," \
+    RT \
+    ".jsx)(\"div\",{className:\"MSCXHint\",children:x}),npTK=[{data:\"\",label:npL(\"The game's own\"" \
+    ",\"游戏自身\")},{data:\"resist\",label:npL(\"Resistance\",\"阻力\")},{data:\"weapon\",label:npL(\"Weapon " \
+    "(gives way with a click)\",\"武器（扣到底时释放）\")},{data:\"slope\",label:npL(\"Slope (grows along the" \
+    " pull)\",\"渐进（越按越重）\")},{data:\"vibrate\",label:npL(\"Vibration\",\"振动\")},{data:\"rumble\",label:n" \
+    "pL(\"Follows the game's rumble\",\"跟随游戏震动\")}],npTH=[{data:\"\",label:npL(\"No change\",\"不变\")}]." \
+    "concat(npTK.slice(1)),npTS=[{data:\"\",label:npL(\"Default\",\"默认\")}].concat([1,2,3,4,5,6,7,8" \
+    "].map(n=>({data:String(n),label:String(n)+(n===1?npL(\" (lightest)\",\"（最轻）\"):n===8?npL(\" (" \
+    "strongest)\",\"（最强）\"):\"\")}))),npTO=k=>k===\"R2\"?\"L2\":\"R2\",npTD=(k,side)=>({resist:npL(\"even" \
+    " resistance from a third of the pull to the end\",\"从扣下三分之一处到底的均匀阻力\"),weapon:npL(\"stiff fr" \
+    "om a third of the pull, then it gives way with a click, like a gun's trigger\",\"从三分之一处变硬，" \
+    "随后咔嗒一声释放，像枪的扳机\"),slope:npL(\"light at first, heavier the further you pull\",\"起初轻，越按越重\"),vi" \
+    "brate:npL(\"a steady buzz along the pull\",\"按压过程中持续振动\"),rumble:side===\"R2\"?npL(\"it vibrate" \
+    "s with the game's light motor\",\"随游戏的轻马达振动\"):npL(\"it vibrates with the game's heavy motor" \
+    "\",\"随游戏的重马达振动\")})[k],npOne=c=>{const m=/^([a-z]+)(?:@([1-8]))?$/.exec(c),a=m&&{light:[\"re" \
+    "sist\",\"2\"],medium:[\"resist\",\"4\"],strong:[\"resist\",\"6\"]}[m[1]];if(!m||m[1]===\"off\"&&m[2])" \
+    "return null;if(m[1]===\"off\")return[\"\",\"\"];if(a)return[a[0],m[2]||a[1]];return npTK.some(" \
+    "k=>k.data&&k.data===m[1])?[m[1],m[2]||\"\"]:null},npTp=(()=>{const v=g(\"NOTPROTON_PAD_TRIG" \
+    "GERS\"),e=[\"\",\"\",\"\",\"\"],r={R2:e,L2:e};if(!v)return r;if(v.indexOf(\":\")<0){const c=npOne(v" \
+    ");return c?{R2:c.concat(\"\",\"\"),L2:c.concat(\"\",\"\")}:r}const n={R2:e.slice(),L2:e.slice()}" \
+    ",seen={};for(const i of v.split(\",\")){const p=i.split(\":\"),k=(p[0]||\"\").toUpperCase(),w=" \
+    "(p[1]||\"\").split(\"+\"),h=w.length===2;if(p.length!==2||!n[k]||w.length>2||seen[k+h]||h&&(" \
+    "w[0]===\"off\"||w[1].toUpperCase()!==npTO(k)))return r;const c=npOne(w[0]);if(!c)return r;" \
+    "seen[k+h]=1;n[k][h?2:0]=c[0];n[k][h?3:1]=c[1]}return n})(),npTw=(side,i,val)=>{const n={" \
+    "R2:npTp.R2.slice(),L2:npTp.L2.slice()},a=n[side],c=(x,y)=>x+(y?\"@\"+y:\"\");a[i]=val;if(!a[" \
+    "0])a[1]=\"\";if(!a[2])a[3]=\"\";s([[\"NOTPROTON_PAD_TRIGGERS\",[\"R2\",\"L2\"].flatMap(k=>(n[k][0]" \
+    "?[k+\":\"+c(n[k][0],n[k][1])]:[]).concat(n[k][2]?[k+\":\"+c(n[k][2],n[k][3])+\"+\"+npTO(k)]:[]" \
+    ")).join(\",\")]])},npTX=side=>{const a=npTp[side],o=npTO(side),b=a[0]&&npTD(a[0],side),h=a" \
+    "[2]&&npTD(a[2],side),up=x=>x[0].toUpperCase()+x.slice(1);return!b&&!h?npL(\"Left to the g" \
+    "ame. Choose an effect for a game that does not set the triggers itself, as no XInput gam" \
+    "e does.\",\"交给游戏。对不自行设置扳机效果的游戏（XInput 游戏都不设置）可选择效果。\"):(b&&h?npL(`${up(b)}; while ${o} is p" \
+    "ressed, ${h}.`,`${b}；按下 ${o} 时：${h}。`):b?npL(`${up(b)}.`,`${b}。`):npL(`Free until ${o} i" \
+    "s pressed, then ${h}.`,`按下 ${o} 之前无效果；按下后：${h}。`))+npL(\" Strength 1 is the lightest, 8 t" \
+    "he strongest.\",\" 强度 1 最轻，8 最强。\")},npTrig=(side,label)=>{const a=npTp[side];return(0," \
+    RT \
+    ".jsxs)(" \
+    BARREL \
+    ".XY,{label:label,children:[(0," \
+    RT \
+    ".jsx)(" \
+    BARREL \
+    ".m,{label:npL(\"Effect\",\"效果\"),rgOptions:npTK,selectedOption:a[0],onChange:v=>npTw(side,0," \
+    "v.data)}),a[0]?(0," \
+    RT \
+    ".jsx)(" \
+    BARREL \
+    ".m,{label:npL(\"Strength\",\"强度\"),rgOptions:npTS,selectedOption:a[1],onChange:v=>npTw(side," \
+    "1,v.data)}):null,(0," \
+    RT \
+    ".jsx)(" \
+    BARREL \
+    ".m,{label:npL(\"While \"+npTO(side)+\" is pressed\",\"按下 \"+npTO(side)+\" 时\"),rgOptions:npTH,se" \
+    "lectedOption:a[2],onChange:v=>npTw(side,2,v.data)}),a[2]?(0," \
+    RT \
+    ".jsx)(" \
+    BARREL \
+    ".m,{label:npL(\"Strength\",\"强度\"),rgOptions:npTS,selectedOption:a[3],onChange:v=>npTw(side," \
+    "3,v.data)}):null,npH(npTX(side))]},side)},npPad=\"1\"===g(\"NOTPROTON_PAD_STEAM_INPUT\")?\"st" \
+    "eam\":g(\"NOTPROTON_PAD_XINPUT\"),"
+
+#define NP_CX_CONTROLLER_ROWS(RT, BARREL) \
+    "...(npRaw?[(0," \
+    RT \
+    ".jsxs)(" \
+    BARREL \
+    ".XY,{label:npL(\"Controller the game sees\",\"游戏看到的控制器\"),children:[(0," \
+    RT \
+    ".jsx)(" \
+    BARREL \
+    ".m,{rgOptions:[{data:\"\",label:npL(\"Automatic (from the Steam store page)\",\"自动（依据 Steam 商" \
+    "店信息）\")},{data:\"1\",label:npL(\"Xbox controller (XInput)\",\"Xbox 控制器（XInput）\")},{data:\"0\",la" \
+    "bel:npL(\"PlayStation controller\",\"PlayStation 控制器\")},{data:\"steam\",label:npL(\"Steam Inpu" \
+    "t's controller, vibration on this pad (Steam Input on)\",\"Steam Input 控制器，震动交给本手柄（需开启 Ste" \
+    "am Input）\")}],selectedOption:npPad,onChange:v=>s([[\"NOTPROTON_PAD_XINPUT\",\"steam\"===v.da" \
+    "ta?\"\":v.data],[\"NOTPROTON_PAD_STEAM_INPUT\",\"steam\"===v.data?\"1\":\"\"]])}),T([\"NOTPROTON_PA" \
+    "D_AS\"],npL(\"Show a DualSense Edge as a standard DualSense\",\"将 DualSense Edge 显示为标准 DualS" \
+    "ense\"),\"dualsense\",\"\"),npH(({\"1\":npL(\"The game sees an Xbox controller, for a game that " \
+    "reads only XInput. It shows Xbox buttons.\",\"游戏看到 Xbox 控制器，适用于只读取 XInput 的游戏，按键图标为 Xbox。\"" \
+    "),\"0\":npL(\"The game reads the DualSense itself, with its own haptics and trigger effects" \
+    " if it has them.\",\"游戏直接读取 DualSense；若游戏支持，会使用其自身的触觉反馈与扳机效果。\"),steam:npL(\"The controls go" \
+    " through Steam Input (turn it on for this game), and the vibration the game sends reache" \
+    "s this pad.\",\"操作经由 Steam Input（请为此游戏开启），游戏发出的震动交给本手柄。\")}[npPad]||npL(\"An Xbox controller" \
+    " for a game whose store page does not list PS5 controller support, the DualSense itself " \
+    "for one that does.\",\"商店页面未标明支持 PS5 手柄的游戏使用 Xbox 控制器，标明支持的游戏直接读取 DualSense。\"))+npL(\" Show" \
+    " the Edge as a standard DualSense for a game that knows the DualSense but not the Edge.\"" \
+    ",\" 若游戏支持 DualSense 但不支持 Edge，请将 Edge 显示为标准 DualSense。\"))]},\"pad\"),(0," \
+    RT \
+    ".jsxs)(" \
+    BARREL \
+    ".XY,{label:npL(\"Vibration\",\"震动\"),children:[(0," \
+    RT \
+    ".jsx)(" \
+    BARREL \
+    ".m,{rgOptions:[{data:\"\",label:npL(\"Motors, as the game sends it\",\"马达（按游戏原样）\")},{data:\"ha" \
+    "ptics\",label:npL(\"Haptic actuators (Bluetooth)\",\"触觉致动器（蓝牙）\")}],selectedOption:g(\"NOTPROT" \
+    "ON_PAD_RUMBLE\"),onChange:v=>s([[\"NOTPROTON_PAD_RUMBLE\",v.data]])}),npH(\"haptics\"===g(\"NO" \
+    "TPROTON_PAD_RUMBLE\")?npL(\"The game's motor rumble also plays on the haptic actuators, fi" \
+    "ner than the motors. Over Bluetooth; a game's own haptics come first.\",\"游戏的马达震动也在触觉致动器上播" \
+    "放，比马达更细腻。仅限蓝牙；游戏自身的触觉反馈优先。\"):npL(\"As the game sends it: the motors, or haptics when the " \
+    "game plays them itself.\",\"按游戏原样：马达，或游戏自身播放的触觉反馈。\"))]},\"vib\"),npTrig(\"R2\",npL(\"R2 effect\"" \
+    ",\"R2 效果\")),npTrig(\"L2\",npL(\"L2 effect\",\"L2 效果\"))]:[]),"
+
+// The variables a suggestion may set: NotProton's, the bridge's and the graphics
+// and Rosetta options the run script forwards. A file read at run time cannot
+// name anything else (dylib/embed_options.py holds the same rule).
+#define NP_SUGGESTED_NAME_JS \
+    "/^(?:(?:NOTPROTON|DSB|CX_GRAPHICS|D3DM|DXMT|DXVK|MTL|ROSETTA)_[A-Z0-9_]+|WINE[EM]SYNC)$/"
+
+// The launch options measured to work for this game (suggested-options.json, or
+// the file of that name in Application Support, read at Steam start, for the games
+// it names), as one switch: on writes them all, off removes them.
+#define NP_CX_SUGGESTED_ROW(RT, BARREL) \
+    "npSG&&(0," RT ".jsxs)(" BARREL ".XY,{label:npL(\"Suggested for this game\",\"为此游戏推荐\")," \
+    "children:[(0," RT ".jsx)(" BARREL ".Yh,{className:\"MSCXRow\"," \
+    "label:npZh&&npSG.summary_zh||npSG.summary," \
+    "checked:npSK.every(k=>g(k)===npSG.options[k])," \
+    "onChange:v=>s(npSK.map(k=>[k,v?npSG.options[k]:\"\"]))})," \
+    "npH(npL(\"Settings measured to work for this game. Turning it off removes them.\"," \
+    "\"已验证适用于此游戏的设置。关闭即移除。\"))]},\"sug\")," \
 
 // FEX runs arm64 Wine, which has no D3DMetal and never runs under Rosetta.
 #define NP_CX_OPTIONS_BODY(ARG, RT, BARREL) \
@@ -319,6 +464,15 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
     "fv=(fe.filter(fk).pop()||\"=2\").replace(/^[^=]*=/,\"\").replace(/\"/g,\"\").trim().split(/\\s/)[0]," \
     "fn=Math.max(isNaN(+fv)?2:+fv,1)," \
     "npR=(()=>{try{return " NP_RUNNER_OPTIONS "[t.strCompatToolName]}catch(npE){}})()," \
+    NP_CX_CONTROLLER_DECLS(RT, BARREL) \
+    "npSV=e=>!!e&&typeof e===\"object\"&&typeof e.summary===\"string\"&&!!e.summary.trim()&&" \
+    "(e.summary_zh===undefined||typeof e.summary_zh===\"string\")&&!!e.options&&" \
+    "typeof e.options===\"object\"&&!Array.isArray(e.options)&&Object.keys(e.options).length>0&&" \
+    "Object.keys(e.options).every(k=>" NP_SUGGESTED_NAME_JS ".test(k)&&typeof e.options[k]===\"string\"&&" \
+    "/^[\\w.,:=\\/+@%-]+$/.test(e.options[k]))," \
+    "npSG=(()=>{let f;try{f=" NP_SUGGESTED_FILE "}catch(npE){}" \
+    "const e=f&&typeof f===\"object\"&&Object.prototype.hasOwnProperty.call(f,t.unAppID)?f[t.unAppID]:null;" \
+    "return npSV(e)?e:(" NP_SUGGESTED_OPTIONS ")[t.unAppID]})(),npSK=npSG?Object.keys(npSG.options):[]," \
     "U=[{data:\"\",label:npL(\"Off\",\"关闭\")}," \
     "{data:\"1.5\",label:\"1.5x\"}," \
     "{data:\"1.72\",label:\"1.72x\"}," \
@@ -333,6 +487,7 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
     "&&!t.strCompatToolName)return null;" \
     "return(0," RT ".jsx)(\"div\",{className:\"MSCXPanel\",children:(0," RT ".jsxs)(" RT ".Fragment,{children:[" \
     "(0," RT ".jsx)(\"style\",{children:" NP_CX_OPTIONS_CSS "})," \
+    NP_CX_SUGGESTED_ROW(RT, BARREL) \
     "(0," RT ".jsxs)(" BARREL ".XY,{label:npL(\"Graphics\",\"图形\"),children:[" \
     "(0," RT ".jsx)(" BARREL ".m,{rgOptions:B,selectedOption:b," \
     "onChange:v=>s([[\"CX_GRAPHICS_BACKEND\",v.data]]" \
@@ -353,10 +508,19 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
     "children:(0," RT ".jsx)(" BARREL ".m,{rgOptions:U," \
     "selectedOption:sw?(U.find(u=>u.data&&+u.data===fn)||{data:String(fn)}).data:\"\"," \
     "onChange:v=>s([[\"DXMT_METALFX_SPATIAL_SWAPCHAIN\",v.data?\"1\":\"\"],[\"DXMT_CONFIG\",fx(v.data)]])})},\"usf\")," \
-    "(0," RT ".jsx)(" BARREL ".XY,{label:npL(\"Controllers (May break Steam Input. Not recommended)\"," \
-    "\"控制器（可能导致 Steam Input 失效，不推荐）\"),children:" \
+    "(0," RT ".jsxs)(" BARREL ".XY,{label:npL(\"Controllers (May break Steam Input. Not recommended)\"," \
+    "\"控制器（可能导致 Steam Input 失效，不推荐）\"),children:[" \
     "T([\"NOTPROTON_RAW_CONTROLLERS\"],npL(\"Let games read controllers directly\"," \
-    "\"允许游戏直接读取控制器\"),\"1\",\"\")},\"ctl\")," \
+    "\"允许游戏直接读取控制器\"),\"1\",\"\")," \
+    "!npRaw&&T([\"NOTPROTON_STEAM_RUMBLE\"],npL(\"Vibration through Steam Input\"," \
+    "\"通过 Steam Input 震动\"),\"\",\"0\")," \
+    "npH(npRaw?npL(\"Games read the controller themselves, not through Steam Input.\"," \
+    "\"游戏直接读取控制器，不经由 Steam Input。\"):npL(\"Direct access lets games read the \"+" \
+    "\"controller themselves, not through Steam Input, and shows a DualSense's own options. \"+" \
+    "\"Vibration through Steam Input sends the rumble a game gives Steam Input's controller \"+" \
+    "\"on to your controller.\",\"直接读取让游戏自行读取控制器而不经由 Steam Input，并显示 DualSense \"+" \
+    "\"的专属选项。通过 Steam Input 震动会把游戏发给 Steam Input 控制器的震动转交给你的手柄。\"))]},\"ctl\")," \
+    NP_CX_CONTROLLER_ROWS(RT, BARREL) \
     NP_RUNNER_OPTIONS_ROWS(RT, BARREL) \
     "]})})}"
 
