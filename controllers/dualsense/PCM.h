@@ -86,3 +86,41 @@ static inline unsigned DSBPCMReport(uint8_t b[206], unsigned seq, unsigned pcmIn
     DSBCRC(b, n);
     return n;
 }
+
+// Rumble rendered on the voice coils, for titles that only send the two motor
+// values (XInput). The heavy left motor becomes a low tone on the left actuator
+// and the light right motor a higher tone on the right one, as on a wired pad's
+// two grips. The tones are a starting point to tune by feel, not a measurement.
+#define DSB_RUMBLE_LOW_HZ 65.0
+#define DSB_RUMBLE_HIGH_HZ 160.0
+typedef struct {
+    double phase[2];
+    float level[2];
+} DSBRumbleSynth;
+
+// One 64-frame block at 3 kHz (21.3 ms). Amplitude ramps linearly from the
+// previous block's level so a step in the motor value does not click.
+// Returns whether any sample is nonzero.
+static inline bool DSBRumbleSynthBlock(DSBRumbleSynth *s, float left, float right,
+                                       int8_t out[128]) {
+    const double hz[2] = {DSB_RUMBLE_LOW_HZ, DSB_RUMBLE_HIGH_HZ};
+    float target[2] = {isfinite(left) ? fmaxf(0, fminf(1, left)) : 0,
+                       isfinite(right) ? fmaxf(0, fminf(1, right)) : 0};
+    bool nonzero = false;
+    for (unsigned i = 0; i < 64; i++) {
+        for (unsigned ch = 0; ch < 2; ch++) {
+            float amplitude = s->level[ch] + (target[ch] - s->level[ch]) * (i + 1) / 64.f;
+            double v = sin(s->phase[ch]) * amplitude * 127;
+            int8_t sample = (int8_t)lrint(fmax(-127, fmin(127, v)));
+            out[i * 2 + ch] = sample;
+            nonzero |= sample != 0;
+            s->phase[ch] += 2 * M_PI * hz[ch] / 3000;
+            if (s->phase[ch] >= 2 * M_PI) {
+                s->phase[ch] -= 2 * M_PI;
+            }
+        }
+    }
+    s->level[0] = target[0];
+    s->level[1] = target[1];
+    return nonzero;
+}

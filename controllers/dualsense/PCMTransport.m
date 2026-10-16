@@ -13,7 +13,9 @@
 static uint8_t inputBuffer[1024];
 static atomic_ullong inputTime;
 static atomic_uint inputReports, pcmReports, pcmUnderruns, pcmDiscarded, inputHz, pcmPauses,
-    pcmBackgroundFrames;
+    pcmBackgroundFrames, synthReports;
+// --rumble-haptics: the motor values rendered as a waveform, owned by the writer.
+static DSBRumbleSynth rumbleSynth;
 static atomic_bool pcmSuspended;
 static int8_t fifo[256][2];
 static unsigned fifoHead, fifoCount, pcmOwner, pcmStream;
@@ -115,6 +117,7 @@ static void pcmInput(void *ctx, IOReturn r, void *sender, IOHIDReportType type, 
             epoch = now;
             previous = count;
         }
+        DSBNotePadInput(b, (size_t)n);
         DSBPCMNotify();
     }
 }
@@ -230,7 +233,8 @@ void *DSBPCMWorker(void *unused) {
         atomic_store(&pcmWorkerReady, true);
         bool streaming = false;
         unsigned index = 0;
-        double nextPCM = 0, previous = 0, nextControl = 0, resumeAfter = 0, previousLoop = 0;
+        double nextPCM = 0, previous = 0, nextControl = 0, resumeAfter = 0, previousLoop = 0,
+               synthNonzero = 0;
         while (atomic_load(&dsb.workerRunning) && !atomic_load(&dsb.stalled)) {
             @autoreleasepool {
                 pcmCycleBegin();
@@ -257,6 +261,9 @@ void *DSBPCMWorker(void *unused) {
                         break;
                     }
                     pcmWait(.030);
+                    pthread_mutex_lock(&dsb.outputLock);
+                    dsb.legacyDirty = false; // This write carries the current motor values.
+                    pthread_mutex_unlock(&dsb.outputLock);
                     if (!pcmControl(NULL, false)) {
                         break;
                     }
@@ -275,10 +282,27 @@ void *DSBPCMWorker(void *unused) {
                 // Games often keep an audio stream open with zeros in menus. Release
                 // audio mode after the actual waveform's tail, not only on stream close.
                 // Exact signed samples determine activity; no envelope conversion/gain.
-                hasAudio = !atomic_load(&pcmSuspended) && pcmNonzero > 0 &&
-                           now - pcmNonzero < .15 &&
-                           (fifoCount || (!pcmEnded && pcmOwner && now - pcmReceived < .15));
-                if (!hasAudio && !streaming) {
+                bool realAudio = !atomic_load(&pcmSuspended) && pcmNonzero > 0 &&
+                                 now - pcmNonzero < .15 &&
+                                 (fifoCount || (!pcmEnded && pcmOwner && now - pcmReceived < .15));
+                // Rumble on the voice coils only when the game plays no haptic audio of
+                // its own; it keeps the stream open 150 ms past the last nonzero motor
+                // value, as real audio does, so a rumble that pulses does not reopen it.
+                float synthLeft = atomic_load(&dsb.synthLeft) / 255.f,
+                      synthRight = atomic_load(&dsb.synthRight) / 255.f;
+                if (dsb.rumbleHaptics && !atomic_load(&pcmSuspended) && !realAudio &&
+                    (synthLeft > 0 || synthRight > 0)) {
+                    synthNonzero = now;
+                }
+                bool synth = dsb.rumbleHaptics && !realAudio && !atomic_load(&pcmSuspended) &&
+                             synthNonzero > 0 && now - synthNonzero < .15;
+                if (!synth) {
+                    rumbleSynth.level[0] = rumbleSynth.level[1] = 0;
+                }
+                hasAudio = realAudio || synth;
+                // While rendered rumble plays, a game's silent haptic stream is not
+                // queued behind it; real audio starts from an empty queue.
+                if ((!hasAudio && !streaming) || synth) {
                     fifoHead = fifoCount = 0;
                 }
                 memcpy(snapshot, dsb.pending, 47);
@@ -287,7 +311,9 @@ void *DSBPCMWorker(void *unused) {
                     control = controlChange =
                         DSBControlDelta(snapshot, dsb.lastSent, dsb.haveLast, payload);
                 }
-                if (!hasAudio && dsb.legacyDirty) {
+                // Motor values are sent with the mode switch when a stream closes, so
+                // they wait until then rather than go out in an audio-mode report.
+                if (!hasAudio && !streaming && dsb.legacyDirty) {
                     control = true;
                     dsb.legacyDirty = false;
                 }
@@ -341,17 +367,22 @@ void *DSBPCMWorker(void *unused) {
                         continue;
                     }
                     int8_t samples[128] = {0};
-                    unsigned n;
-                    pthread_mutex_lock(&dsb.outputLock);
-                    n = MIN(fifoCount, 64);
-                    for (unsigned i = 0; i < n; i++) {
-                        memcpy(samples + i * 2, fifo[fifoHead], 2);
-                        fifoHead = (fifoHead + 1) % 256;
-                        fifoCount--;
-                    }
-                    pthread_mutex_unlock(&dsb.outputLock);
-                    if (n < 64 && hasAudio) {
-                        atomic_fetch_add(&pcmUnderruns, 64 - n);
+                    unsigned n = 0;
+                    if (synth) {
+                        DSBRumbleSynthBlock(&rumbleSynth, synthLeft, synthRight, samples);
+                        atomic_fetch_add(&synthReports, 1);
+                    } else {
+                        pthread_mutex_lock(&dsb.outputLock);
+                        n = MIN(fifoCount, 64);
+                        for (unsigned i = 0; i < n; i++) {
+                            memcpy(samples + i * 2, fifo[fifoHead], 2);
+                            fifoHead = (fifoHead + 1) % 256;
+                            fifoCount--;
+                        }
+                        pthread_mutex_unlock(&dsb.outputLock);
+                        if (n < 64 && realAudio) {
+                            atomic_fetch_add(&pcmUnderruns, 64 - n);
+                        }
                     }
                     uint8_t b[206];
                     unsigned size = DSBPCMReport(b, dsb.btSequence++, index, index == 0, samples);
@@ -366,6 +397,9 @@ void *DSBPCMWorker(void *unused) {
                         // Allow the zero tail to reach the actuators, then restore regular
                         // rumble. No LED changes. All writes remain serialized in this thread.
                         pcmWait(.030);
+                        pthread_mutex_lock(&dsb.outputLock);
+                        dsb.legacyDirty = false; // This write carries the current motor values.
+                        pthread_mutex_unlock(&dsb.outputLock);
                         if (!pcmControl(NULL, false)) {
                             break;
                         }
@@ -427,6 +461,7 @@ NSDictionary *DSBPCMSnapshot(void) {
         @"pauses" : @(atomic_load(&pcmPauses)),
         @"backgroundFrames" : @(atomic_load(&pcmBackgroundFrames)),
         @"reports" : @(atomic_load(&pcmReports)),
+        @"synthReports" : @(atomic_load(&synthReports)),
         @"inputReports" : @(atomic_load(&inputReports)),
         @"queueFrames" : @(fifoCount),
         @"underrunFrames" : @(atomic_load(&pcmUnderruns)),

@@ -21,6 +21,14 @@ typedef struct {
     atomic_uint reports, errors;
     atomic_ullong writeStartedNS;
     atomic_uchar legacyLeft, legacyRight;
+    // --rumble-haptics: the motor values also drive a synthesized waveform on the
+    // voice coils while no real haptic audio plays and the link carries PCM.
+    bool rumbleHaptics;
+    atomic_uchar synthLeft, synthRight;
+    // The pad's own trigger positions (0 R2, 1 L2) from its input reports, for
+    // trigger effects that wait for the other trigger.
+    atomic_uchar padTrigger[2];
+    atomic_uint padTriggerReports;
     uint8_t btSequence; // Owned only by the active output worker.
 } DSBBrokerState;
 extern DSBBrokerState dsb;
@@ -39,3 +47,13 @@ bool DSBPCMSuspended(void);
 void DSBPCMReceive(const DSBPacket *packet);
 // Takes its own lock. Callers must not hold outputLock.
 NSDictionary *DSBPCMSnapshot(void);
+
+// A Bluetooth input report 0x31 carries L2 and R2 at bytes 6 and 7 (USB report
+// 0x01's bytes 5 and 6, one later for the Bluetooth header byte).
+static inline void DSBNotePadInput(const uint8_t *report, size_t length) {
+    if (length >= 8 && report[0] == 0x31) {
+        atomic_store(&dsb.padTrigger[0], report[7]);
+        atomic_store(&dsb.padTrigger[1], report[6]);
+        atomic_fetch_add(&dsb.padTriggerReports, 1);
+    }
+}

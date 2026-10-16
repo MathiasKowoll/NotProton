@@ -188,13 +188,62 @@ func main() throws -> Int32 {
         try? files.removeItem(at: info)
         try? log.close()
     }
+    // Per-title feedback the game does not ask for itself, for titles that only
+    // send motor values: NOTPROTON_PAD_RUMBLE=haptics plays them on the voice
+    // coils; NOTPROTON_PAD_TRIGGERS sets trigger effects, one for both triggers
+    // ("medium") or one per trigger ("R2:weapon,L2:rumble"), and per trigger a
+    // second one, ending in "+L2" or "+R2", for while the other trigger is
+    // pressed ("R2:resist@2,R2:weapon+L2"). The broker checks the same words;
+    // anything else is left out here, so a typo cannot cost the session its
+    // bridge.
+    let rumbleHaptics = pcm && environment["NOTPROTON_PAD_RUMBLE"] == "haptics"
+    let triggerKinds: Set<String> = [
+        "off", "light", "medium", "strong", "resist", "weapon", "slope", "vibrate", "rumble",
+    ]
+    func validChoice(_ choice: Substring) -> Bool {
+        let parts = choice.split(separator: "@", omittingEmptySubsequences: false)
+        guard let kind = parts.first, triggerKinds.contains(String(kind)) else { return false }
+        if parts.count == 1 { return true }
+        return parts.count == 2 && kind != "off" && ["1", "2", "3", "4", "5", "6", "7", "8"].contains(parts[1])
+    }
+    func validTriggers(_ spec: String) -> Bool {
+        if !spec.contains(":") { return validChoice(Substring(spec)) }
+        var sides = Set<String>()
+        for item in spec.split(separator: ",", omittingEmptySubsequences: false) {
+            let parts = item.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count == 2, ["R2", "L2"].contains(parts[0].uppercased()) else { return false }
+            let side = parts[0].uppercased()
+            let wait = parts[1].split(separator: "+", omittingEmptySubsequences: false)
+            // Each side has one effect, and one for while the other is pressed.
+            guard wait.count <= 2, validChoice(wait[0]), sides.insert(side + "\(wait.count)").inserted
+            else { return false }
+            if wait.count == 2 {
+                guard wait[0] != "off", wait[1].uppercased() == (side == "R2" ? "L2" : "R2") else {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+    let triggerSpec = environment["NOTPROTON_PAD_TRIGGERS"].flatMap { validTriggers($0) ? $0 : nil }
+    if rumbleHaptics {
+        fputs("DualSense launch: rumble plays on the haptic actuators (NOTPROTON_PAD_RUMBLE=haptics)\n", stderr)
+    }
+    if let triggerSpec {
+        fputs("DualSense launch: trigger effects \(triggerSpec) (NOTPROTON_PAD_TRIGGERS)\n", stderr)
+    } else if let unknown = environment["NOTPROTON_PAD_TRIGGERS"] {
+        fputs("DualSense launch: NOTPROTON_PAD_TRIGGERS=\(unknown) not understood; triggers left alone\n", stderr)
+    }
     func startBroker(port: Int? = nil) throws -> Int {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = root.appendingPathComponent("broker")
-        process.arguments =
-            ["--token", token, "--parent", String(getpid()), "--status", stats.path]
-            + (pcm ? ["--pcm"] : []) + (port.map { ["--port", String($0)] } ?? [])
+        var arguments = ["--token", token, "--parent", String(getpid()), "--status", stats.path]
+        if pcm { arguments.append("--pcm") }
+        if let port { arguments += ["--port", String(port)] }
+        if rumbleHaptics { arguments.append("--rumble-haptics") }
+        if let triggerSpec { arguments += ["--triggers", triggerSpec] }
+        process.arguments = arguments
         process.environment = brokerEnvironment
         process.standardOutput = pipe
         process.standardError = log

@@ -6,6 +6,9 @@
 #define DSB_LEVEL 1
 #define DSB_OUTPUT 2
 #define DSB_PCM 3
+// Dry run only: report[] is a Bluetooth input report 0x31 played in place of
+// the pad's own, for the trigger effects that read it.
+#define DSB_INPUT 4
 // report[0]: frame count (0=end, 30=10ms), report[1..3]: stream ID,
 // report[4..63]: 30 signed-8-bit stereo PCM frames at 3000 Hz.
 typedef struct __attribute__((packed)) {

@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "PCM.h"
 int main(void) {
     for (int f = 0; f < 2; f++) {
@@ -53,6 +54,41 @@ int main(void) {
                    b[n - 2] == ((crc >> 16) & 255) && b[n - 1] == (crc >> 24));
         }
     }
+    // Rumble on the voice coils: silence stays silent, full motors reach full
+    // scale, each side carries its own tone, and block edges do not click.
+    DSBRumbleSynth synth = {{0, 0}, {0, 0}};
+    int8_t block[128];
+    assert(!DSBRumbleSynthBlock(&synth, 0, 0, block));
+    for (int i = 0; i < 128; i++) {
+        assert(block[i] == 0);
+    }
+    int peak[2] = {0, 0}, crossings[2] = {0, 0}, last[2] = {0, 0}, jump = 0;
+    for (int b = 0; b < 141; b++) { // ~3 s at 3 kHz
+        assert(DSBRumbleSynthBlock(&synth, b == 0 ? .5f : 1, 1, block));
+        for (int i = 0; i < 64; i++) {
+            for (int ch = 0; ch < 2; ch++) {
+                int v = block[i * 2 + ch];
+                peak[ch] = abs(v) > peak[ch] ? abs(v) : peak[ch];
+                if ((v >= 0) != (last[ch] >= 0)) {
+                    crossings[ch]++;
+                }
+                if (b > 0 && abs(v - last[ch]) > jump) {
+                    jump = abs(v - last[ch]);
+                }
+                last[ch] = v;
+            }
+        }
+    }
+    assert(peak[0] >= 125 && peak[1] >= 125);
+    double seconds = 141 * 64 / 3000.;
+    assert(fabs(crossings[0] / (2 * seconds) - DSB_RUMBLE_LOW_HZ) < 3);
+    assert(fabs(crossings[1] / (2 * seconds) - DSB_RUMBLE_HIGH_HZ) < 3);
+    // One sample step of a 160 Hz full-scale sine at 3 kHz is at most ~43.
+    assert(jump < 48);
+    // A drop to zero ramps out within one block rather than cutting off.
+    assert(DSBRumbleSynthBlock(&synth, 0, 0, block));
+    assert(!DSBRumbleSynthBlock(&synth, 0, 0, block));
+    assert(!DSBRumbleSynthBlock(&synth, NAN, -1, block));
     puts("==> dualsense PCM: waveform, antialias filter, sample rate, payload, "
-         "independent CRC and sequence wrap");
+         "independent CRC and sequence wrap; rumble tones, scale and ramps");
 }

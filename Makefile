@@ -567,6 +567,7 @@ dualsense-check: dualsense
 	DSB_TEST_BUILD=$(DUALSENSE_OUT) DSB_TEST_DEFER_TIMERS=1 python3 $(DUALSENSE_SRC)/test-pcm.py
 	DSB_TEST_BUILD=$(DUALSENSE_OUT) python3 $(DUALSENSE_SRC)/test-lifecycle.py
 	DSB_TEST_BUILD=$(DUALSENSE_OUT) python3 $(DUALSENSE_SRC)/test-trigger-routing.py
+	DSB_TEST_BUILD=$(DUALSENSE_OUT) python3 $(DUALSENSE_SRC)/test-rumble-haptics.py
 
 STEAM_RUMBLE_SRC := controllers/steam-input
 STEAM_RUMBLE_OUT := $(OUT_DIR)/controllers/steam-input

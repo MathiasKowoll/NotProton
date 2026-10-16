@@ -17,6 +17,7 @@
 #include "protocol.h"
 #include "Calibration.h"
 #include "Controls.h"
+#include "PCM.h"
 
 // Local per-session service. Only receives packets bearing the launch token.
 // --pcm selects the bounded direct PCM transport; default retains Core Haptics.
@@ -35,6 +36,18 @@ static uint8_t releaseEffect[2][11];
 static unsigned suppressedResets[2];
 // Trigger effects received per side (0 = R2 at offset 10, 1 = L2 at offset 21).
 static unsigned triggerUpdates[2];
+// --triggers: per-trigger effects for titles that write none (kinds[0] R2,
+// kinds[1] L2). A side the game writes itself becomes the game's for good.
+static const char *triggerSpec;
+static DSBTriggerSpec triggerChoice;
+// A side whose effect waits for the other trigger: whether that trigger is
+// held now, and how often the effect went on or off.
+static bool waitHeld[2];
+static uint64_t triggerWaitChanges;
+static bool gameOwnsTrigger[2];
+static uint8_t triggerRumbleStep[2];
+static double triggerRumbleAt[2];
+static uint64_t triggerRumbleUpdates;
 static uint64_t ledCommands, playerCommands;
 static uint32_t ledSource;
 static uint8_t ledRGB[3], playerLED;
@@ -98,6 +111,9 @@ static void queueOutput(const uint8_t *usb) {
             continue;
         }
         triggerUpdates[side]++;
+        if (!dsb.quitting) {
+            gameOwnsTrigger[side] = true;
+        }
         const uint8_t *effect = src + offset;
         if (effect[0] == 0x21) {
             lastActive[side] = now;
@@ -315,6 +331,8 @@ static bool validPayload(const DSBPacket *packet) {
         return dsb.pcmMode && (packet->report[0] == 0 || packet->report[0] == 30);
     case DSB_OUTPUT:
         return packet->report[0] == 2;
+    case DSB_INPUT:
+        return dsb.dry && packet->report[0] == 0x31;
     default:
         return false;
     }
@@ -415,6 +433,8 @@ static void receivePackets(int fd, const uint8_t token[16], double now, SessionM
                 s->rumbleRight = b[2] / 255.f;
             }
             // LED/trigger-only transactions leave the last rumble intact.
+        } else if (p.kind == DSB_INPUT) {
+            DSBNotePadInput(p.report, sizeof(p.report));
         } else {
             metrics->dropped++;
             continue;
@@ -434,6 +454,70 @@ static bool rumbleHeld(const Source *s, double now) {
 
 static bool moved(uint8_t value, uint8_t sent) {
     return value != sent && (!value || abs((int)value - (int)sent) >= 4);
+}
+
+// A trigger set to rumble vibrates with the game's motor: R2 with the light
+// right motor, L2 with the heavy left one, in eight steps. A step changes at
+// most every 60 ms, so a game's rumble ramp costs a handful of control writes.
+static void updateTriggerRumble(double now, uint8_t right, uint8_t left) {
+    const uint8_t motor[2] = {right, left};
+    for (int side = 0; side < 2; side++) {
+        uint8_t kind, strength;
+        DSBTriggerActive(&triggerChoice, side, waitHeld[side], &kind, &strength);
+        if (kind != DSB_TRIGGER_RUMBLE || gameOwnsTrigger[side]) {
+            continue;
+        }
+        uint8_t step = DSBTriggerRumbleStep(motor[side]);
+        if (step == triggerRumbleStep[side] || now - triggerRumbleAt[side] < .06) {
+            continue;
+        }
+        uint8_t effect[11];
+        if (step) {
+            DSBTriggerVibration(2, DSBTriggerRumbleAmplitude(step, strength), DSB_TRIGGER_RUMBLE_HZ,
+                                effect);
+        } else {
+            memset(effect, 0, 11);
+            effect[0] = 5;
+        }
+        pthread_mutex_lock(&dsb.outputLock);
+        dsb.pending[0] |= 4u << side;
+        memcpy(dsb.pending + 10 + side * 11, effect, 11);
+        dsb.outputDirty = true;
+        pthread_mutex_unlock(&dsb.outputLock);
+        triggerRumbleStep[side] = step;
+        triggerRumbleAt[side] = now;
+        triggerRumbleUpdates++;
+    }
+}
+
+// A side with an effect for while the other trigger is pressed
+// ("R2:resist@2,R2:weapon@8+L2"): it switches between its two effects as that
+// trigger is pressed and released, read from the pad's own input reports. No
+// effect is a released trigger. A rumble effect starts from still and the
+// rumble update moves it.
+static void updateTriggerWaits(void) {
+    for (int side = 0; side < 2; side++) {
+        if (!triggerChoice.when[side] || gameOwnsTrigger[side]) {
+            continue;
+        }
+        uint8_t other = atomic_load(&dsb.padTrigger[triggerChoice.when[side] - 1]);
+        bool held = DSBTriggerPressed(waitHeld[side], other);
+        if (held == waitHeld[side]) {
+            continue;
+        }
+        waitHeld[side] = held;
+        triggerWaitChanges++;
+        uint8_t kind, strength, effect[11] = {5};
+        DSBTriggerActive(&triggerChoice, side, held, &kind, &strength);
+        DSBTriggerPreset(kind, strength, effect);
+        triggerRumbleStep[side] = 0;
+        triggerRumbleAt[side] = 0;
+        pthread_mutex_lock(&dsb.outputLock);
+        dsb.pending[0] |= 4u << side;
+        memcpy(dsb.pending + 10 + side * 11, effect, 11);
+        dsb.outputDirty = true;
+        pthread_mutex_unlock(&dsb.outputLock);
+    }
 }
 
 static bool updateEffects(double now, float pcmGain, SessionMetrics *metrics) {
@@ -469,6 +553,19 @@ static bool updateEffects(double now, float pcmGain, SessionMetrics *metrics) {
                 a = fmaxf(a, sources[i].rumbleLeft);
                 b = fmaxf(b, sources[i].rumbleRight);
             }
+        }
+        if (dsb.rumbleHaptics) {
+            // Only the game's motor values: the envelope above is real haptic
+            // audio, which the writer already plays and must not be played twice.
+            // Under 4 of 255 is the motors path's deadband; it would only keep a
+            // stream of silence open here.
+            uint8_t sl = (uint8_t)lrintf(a * 255), sr = (uint8_t)lrintf(b * 255);
+            atomic_store(&dsb.synthLeft, sl < 4 ? 0 : sl);
+            atomic_store(&dsb.synthRight, sr < 4 ? 0 : sr);
+        }
+        updateTriggerWaits();
+        updateTriggerRumble(now, (uint8_t)lrintf(b * 255), (uint8_t)lrintf(a * 255));
+        for (int i = 0; i < 64; i++) {
             if (envelope && now - sources[i].lastLevelAt < .15) {
                 float el = DSBCalibratedPCM(sources[i].levelLeft, pcmGain),
                       er = DSBCalibratedPCM(sources[i].levelRight, pcmGain);
@@ -494,6 +591,16 @@ static bool updateEffects(double now, float pcmGain, SessionMetrics *metrics) {
     }
     if (dsb.pcmMode) {
         DSBPCMNotify();
+    }
+    if (!dsb.pcmMode) {
+        float a = 0, b = 0;
+        for (int i = 0; i < 64; i++) {
+            if (rumbleHeld(sources + i, now)) {
+                a = fmaxf(a, sources[i].rumbleLeft);
+                b = fmaxf(b, sources[i].rumbleRight);
+            }
+        }
+        updateTriggerRumble(now, (uint8_t)lrintf(b * 255), (uint8_t)lrintf(a * 255));
     }
     metrics->peakLeft = fmaxf(metrics->peakLeft, l);
     metrics->peakRight = fmaxf(metrics->peakRight, r);
@@ -550,6 +657,20 @@ static void writeStatus(NSString *status, unsigned port, float pcmGain,
         @"pcmBlocks" : @(metrics->levels),
         @"envelopeUpdates" : @(metrics->envelopeUpdates),
         @"pcmGain" : @(pcmGain),
+        @"rumbleHaptics" : @(dsb.rumbleHaptics),
+        @"triggerSpec" : triggerSpec ? @(triggerSpec) : [NSNull null],
+        @"triggerRumbleUpdates" : @(triggerRumbleUpdates),
+        @"gameOwnsTriggers" : @[ @(gameOwnsTrigger[0]), @(gameOwnsTrigger[1]) ],
+        @"triggerWaits" : @[
+            triggerChoice.when[0] ? @"L2" : [NSNull null], triggerChoice.when[1] ? @"R2" : [NSNull null]
+        ],
+        @"triggerWaitHeld" : @[ @(waitHeld[0]), @(waitHeld[1]) ],
+        @"triggerWaitChanges" : @(triggerWaitChanges),
+        @"padTriggers" : @{
+            @"r2" : @(atomic_load(&dsb.padTrigger[0])),
+            @"l2" : @(atomic_load(&dsb.padTrigger[1])),
+            @"reports" : @(atomic_load(&dsb.padTriggerReports))
+        },
         @"outputCommands" : @(metrics->outputs),
         @"hidReports" : @(atomic_load(&dsb.reports)),
         @"hidErrors" : @(atomic_load(&dsb.errors)),
@@ -585,6 +706,13 @@ static bool parseArguments(int argc, char **argv, BrokerOptions *options) {
                 return false;
             }
             resetGrace = ms / 1000.;
+        } else if (!strcmp(argv[i], "--rumble-haptics")) {
+            dsb.rumbleHaptics = true;
+        } else if (!strcmp(argv[i], "--triggers") && i + 1 < argc) {
+            if (!DSBParseTriggers(argv[++i], &triggerChoice)) {
+                return false;
+            }
+            triggerSpec = argv[i];
         } else if (!strcmp(argv[i], "--dry-run")) {
             dsb.dry = true;
         } else if (!strcmp(argv[i], "--token") && i + 1 < argc) {
@@ -807,6 +935,57 @@ int main(int argc, char **argv) {
                 atomic_store(&dsb.workerRunning, false);
                 atomic_store(&dsb.stalled, true);
                 return 9;
+            }
+        }
+        if (dsb.rumbleHaptics && !dsb.pcmMode) {
+            // Without the PCM writer there are no voice coils to render on.
+            dsb.rumbleHaptics = false;
+            fprintf(stderr, "Rumble haptics need the PCM transport; motors only\n");
+        } else if (dsb.rumbleHaptics) {
+            fprintf(stderr, "Rumble haptics: motor values play on the voice coils "
+                            "(%.0f/%.0f Hz) while no haptic audio plays\n",
+                    DSB_RUMBLE_LOW_HZ, DSB_RUMBLE_HIGH_HZ);
+        }
+        if (triggerSpec) {
+            // Fixed effects go out now; a rumble side follows the motors. The
+            // game's own trigger writes replace either as they arrive, and the
+            // session's cleanup releases them like any trigger it set.
+            static const char *const kindNames[] = {"untouched", "light",   "medium",
+                                                    "strong",    "weapon",  "slope",
+                                                    "vibrate",   "rumble",  "resist"};
+            static const char *const sideNames[] = {"R2", "L2"};
+            for (int side = 0; side < 2; side++) {
+                if (triggerChoice.when[side] && !dsb.pcmMode) {
+                    // Only the PCM transport reads the pad's input reports.
+                    fprintf(stderr,
+                            "Trigger waits need the PCM transport; %s keeps only its first effect\n",
+                            sideNames[side]);
+                    triggerChoice.when[side] = triggerChoice.held[side] = 0;
+                    triggerChoice.heldStrength[side] = 0;
+                }
+            }
+            pthread_mutex_lock(&dsb.outputLock);
+            for (int side = 0; side < 2; side++) {
+                uint8_t effect[11];
+                if (DSBTriggerPreset(triggerChoice.kind[side], triggerChoice.strength[side], effect)) {
+                    dsb.pending[0] |= 4u << side;
+                    memcpy(dsb.pending + 10 + side * 11, effect, 11);
+                    dsb.outputDirty = true;
+                }
+            }
+            pthread_mutex_unlock(&dsb.outputLock);
+            if (dsb.pcmMode) {
+                DSBPCMNotify();
+            }
+            for (int side = 0; side < 2; side++) {
+                fprintf(stderr, "Triggers %s: %s %s (strength %u)", triggerSpec, sideNames[side],
+                        kindNames[triggerChoice.kind[side]], triggerChoice.strength[side]);
+                if (triggerChoice.when[side]) {
+                    fprintf(stderr, ", %s (strength %u) while %s is pressed",
+                            kindNames[triggerChoice.held[side]], triggerChoice.heldStrength[side],
+                            sideNames[1 - side]);
+                }
+                fputc('\n', stderr);
             }
         }
         printf("{\"ready\":true,\"port\":%u,\"pid\":%d}\n", port, getpid());

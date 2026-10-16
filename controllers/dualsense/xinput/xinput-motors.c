@@ -500,11 +500,19 @@ static void pad_caps(XCAPS *caps)
     caps->Vibration.wLeftMotorSpeed = caps->Vibration.wRightMotorSpeed = 0xff;
 }
 
+/* XInputEnable(FALSE) stops vibration and holds what the game asks for until
+ * it is enabled again (wine's xinput does the same with its own device). */
+static BOOL vibration_disabled;
+static BYTE wanted_left, wanted_right;
+
 static void motors_to_broker(const XVIB *vib)
 {
     BYTE left = vib->wLeftMotorSpeed >> 8, right = vib->wRightMotorSpeed >> 8;
     EnterCriticalSection(&lock);
-    if (left != motor_left || right != motor_right) send_motors_locked(left, right);
+    wanted_left = left;
+    wanted_right = right;
+    if (!vibration_disabled && (left != motor_left || right != motor_right))
+        send_motors_locked(left, right);
     LeaveCriticalSection(&lock);
 }
 
@@ -610,6 +618,16 @@ DWORD WINAPI XInputGetCapabilitiesEx(DWORD unk, DWORD index, DWORD flags, XCAPSE
 void WINAPI XInputEnable(BOOL enable)
 {
     ORIG(enable_fn, "XInputEnable");
+    InitOnceExecuteOnce(&once, init_broker, NULL, NULL);
+    if (broker)
+    {
+        EnterCriticalSection(&lock);
+        vibration_disabled = !enable;
+        if (!enable && (motor_left || motor_right)) send_motors_locked(0, 0);
+        else if (enable && (wanted_left != motor_left || wanted_right != motor_right))
+            send_motors_locked(wanted_left, wanted_right);
+        LeaveCriticalSection(&lock);
+    }
     if (p_) p_(enable);
 }
 

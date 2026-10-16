@@ -33,6 +33,7 @@ if '--probe' in sys.argv:
     usb = int(os.environ.get('TEST_USB', '0'))
     print(json.dumps(dict(bluetooth=0 if usb else 1, usb=usb, eligible=not usb)), flush=True)
     sys.exit()
+Path(__file__).with_name('broker-args.json').write_text(json.dumps(sys.argv[1:]))
 if os.environ.get('TEST_BAD_READY'):
     print('{}', flush=True)
 else:
@@ -84,6 +85,47 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
             assert json.loads((root / "sessions/999999-status.json").read_text())["route"] == route
         assert not (root / "sessions/999999.json").exists()
         print("  ok    dualsense launcher:", route, flush=True)
+
+    # Per-title feedback reaches the broker only when asked for, and an unknown
+    # profile name is left out rather than passed on.
+    for extra, wanted, unwanted in [
+        ({}, [], ["--rumble-haptics", "--triggers"]),
+        ({"NOTPROTON_PAD_RUMBLE": "haptics", "NOTPROTON_PAD_TRIGGERS": "medium"},
+         ["--rumble-haptics", "--triggers", "medium"], []),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:weapon,L2:rumble"}, ["--triggers", "R2:weapon,L2:rumble"],
+         ["--rumble-haptics"]),
+        ({"NOTPROTON_PAD_RUMBLE": "motors", "NOTPROTON_PAD_TRIGGERS": "max"},
+         [], ["--rumble-haptics", "--triggers"]),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:weapon,R2:light"}, [], ["--triggers"]),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:weapon@8,L2:slope@4"}, ["--triggers"], []),
+        ({"NOTPROTON_PAD_TRIGGERS": "resist@9"}, [], ["--triggers"]),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:off@2"}, [], ["--triggers"]),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:weapon@8+L2,L2:resist@2"}, ["--triggers"], []),
+        ({"NOTPROTON_PAD_TRIGGERS": "l2:rumble+r2"}, ["--triggers"], []),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:weapon+R2"}, [], ["--triggers"]),
+        ({"NOTPROTON_PAD_TRIGGERS": "weapon+L2"}, [], ["--triggers"]),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:off+L2"}, [], ["--triggers"]),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:weapon+L2+L2"}, [], ["--triggers"]),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:resist@2,R2:weapon@8+L2,L2:rumble,L2:resist@6+R2"},
+         ["--triggers"], []),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:resist,R2:weapon+L2,R2:slope"}, [], ["--triggers"]),
+        ({"NOTPROTON_PAD_TRIGGERS": "R2:weapon+L2,R2:slope+L2"}, [], ["--triggers"]),
+        ({"NOTPROTON_PAD_RUMBLE": "haptics", "DSB_PCM": "0"}, [], ["--rumble-haptics"]),
+    ]:
+        env = dict(clean, NOTPROTON_RAW_CONTROLLERS="1", **extra)
+        recorded = root / "broker-args.json"
+        recorded.unlink(missing_ok=True)
+        result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=12)
+        assert result.returncode == 0, (extra, result.stderr)
+        assert recorded.exists(), extra
+        passed = json.loads(recorded.read_text())
+        assert all(a in passed for a in wanted) and not any(a in passed for a in unwanted), (
+            extra, passed)
+        if "--triggers" in passed:
+            assert passed[passed.index("--triggers") + 1] == extra["NOTPROTON_PAD_TRIGGERS"], passed
+        if extra.get("DSB_PCM") == "0":
+            assert "--pcm" not in passed, passed
+    print("  ok    dualsense launcher: per-title feedback options", flush=True)
 
     env = dict(clean, NOTPROTON_RAW_CONTROLLERS="1")
     result = subprocess.run(
