@@ -1,0 +1,7 @@
+LIBRARY dinput8.dll
+EXPORTS
+    DirectInput8Create @1
+    DllCanUnloadNow = dinput8_np.DllCanUnloadNow @2
+    DllGetClassObject = dinput8_np.DllGetClassObject @3
+    DllRegisterServer = dinput8_np.DllRegisterServer @4
+    DllUnregisterServer = dinput8_np.DllUnregisterServer @5
