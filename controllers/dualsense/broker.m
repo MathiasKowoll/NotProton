@@ -333,6 +333,8 @@ static bool validPayload(const DSBPacket *packet) {
         return packet->report[0] == 2;
     case DSB_INPUT:
         return dsb.dry && packet->report[0] == 0x31;
+    case DSB_MOTORS:
+        return true;
     default:
         return false;
     }
@@ -433,6 +435,28 @@ static void receivePackets(int fd, const uint8_t token[16], double now, SessionM
                 s->rumbleRight = b[2] / 255.f;
             }
             // LED/trigger-only transactions leave the last rumble intact.
+        } else if (p.kind == DSB_MOTORS) {
+            float left = fmaxf(0, fminf(1, p.left)), right = fmaxf(0, fminf(1, p.right));
+            // Each new pair a source asks for, once, as the output log does.
+            {
+                static uint64_t seen[40];
+                static unsigned count;
+                uint64_t k = (uint64_t)lrintf(left * 255) | (uint64_t)lrintf(right * 255) << 8 |
+                             (uint64_t)p.pid << 16;
+                bool known = false;
+                for (unsigned i = 0; i < count; i++) {
+                    known |= seen[i] == k;
+                }
+                if (!known && count < 40) {
+                    seen[count++] = k;
+                    fprintf(stderr, "Motors source=%u L=%ld R=%ld\n", p.pid, lrintf(left * 255),
+                            lrintf(right * 255));
+                }
+            }
+            s->lastRumbleAt = now;
+            s->rumbleLeft = left;
+            s->rumbleRight = right;
+            metrics->outputs++;
         } else if (p.kind == DSB_INPUT) {
             DSBNotePadInput(p.report, sizeof(p.report));
         } else {

@@ -14,9 +14,9 @@
  *
  * The controller bridge already has a single writer to the pad, the broker,
  * which merges every source and owns the Bluetooth output budget. So the
- * motors XInput asks for are sent to the broker the way a game's own wired
- * output report would be: a DSB_OUTPUT datagram carrying report 0x02 with only
- * the motor bytes valid. Triggers, lights and the game's own writes are not
+ * motors XInput asks for are sent to the broker as a DSB_MOTORS datagram: the
+ * two motor values and nothing of the pad's own reports, which the broker folds
+ * with every other source. Triggers, lights and the game's own writes are not
  * touched. Without a broker session (DSB_PORT/DSB_TOKEN unset) nothing is sent.
  *
  * Only a pad whose XInputGetCapabilitiesEx names vendor 054c is forwarded, so
@@ -116,7 +116,7 @@ typedef DWORD (WINAPI *audio_ids_fn)(DWORD, WCHAR *, UINT *, WCHAR *, UINT *);
 
 /* controllers/dualsense/protocol.h, restated for a PE build. */
 #define DSB_MAGIC 0x31425344u
-#define DSB_OUTPUT 2
+#define DSB_MOTORS 5
 #pragma pack(push, 1)
 typedef struct {
     uint32_t magic, kind;
@@ -167,18 +167,14 @@ static void send_motors_locked(BYTE left, BYTE right)
 
     memset(&p, 0, sizeof(p));
     p.magic = DSB_MAGIC;
-    p.kind = DSB_OUTPUT;
+    p.kind = DSB_MOTORS;
     memcpy(p.token, token, 16);
     p.pid = source;
     p.sequence = ++sequence;
     p.timestamp = cf_absolute_time();
-    /* A wired output report 0x02 that says only "these are the motors":
-     * flag0 bit 0 (motor values valid) and bit 1 (haptics select); byte 3 is
-     * the small right motor, byte 4 the big left one. */
-    p.report[0] = 0x02;
-    p.report[1] = 0x03;
-    p.report[3] = right;
-    p.report[4] = left;
+    /* The heavy left motor and the light right one, 0 to 1. */
+    p.left = left / 255.0f;
+    p.right = right / 255.0f;
     r = sendto(sock, (const char *)&p, sizeof(p), 0, (const struct sockaddr *)&dest, sizeof(dest));
     if (r == sizeof(p))
     {

@@ -14,8 +14,18 @@ wire = struct.Struct("<II16sIIdff64s")
 token = bytes.fromhex("56" * 16)
 
 
-def packet(seq, report, kind, pid=1234):
-    return wire.pack(0x31425344, kind, token, pid, seq, time.time() - 978307200, 0, 0, report)
+def packet(seq, report, kind, pid=1234, left=0.0, right=0.0):
+    return wire.pack(0x31425344, kind, token, pid, seq, time.time() - 978307200, left, right, report)
+
+
+def neutral(sock, addr, seq, seconds, left, right):
+    # The XInput and DirectInput pieces' packet: the two motor values, no report.
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        seq += 1
+        sock.sendto(packet(seq, bytes(64), 5, left=left / 255, right=right / 255), addr)
+        time.sleep(0.01)
+    return seq
 
 
 def pad(l2, r2):
@@ -324,6 +334,40 @@ finally:
     log.close()
     sock.close()
 
+# The neutral motor packet (DSB_MOTORS) drives everything the Sony-shaped
+# motor report did: the rendered rumble and a trigger that follows the motor.
+p, port, status, log = broker("--pcm", "--rumble-haptics", "--triggers", "L2:rumble", seconds=10)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+addr = ("127.0.0.1", port)
+try:
+    time.sleep(1.2)
+    seq = neutral(sock, addr, 0, 1.0, 200, 120)
+    time.sleep(1.1)
+    s = state(status)
+    assert s["pcm"]["synthReports"] > 40 and s["outputCommands"] > 50, s
+    assert s["triggers"]["l2"][0] == 0x26 and s["triggerRumbleUpdates"] == 1, s["triggers"]
+    seq = neutral(sock, addr, seq, 0.3, 0, 0)
+    time.sleep(1.1)
+    s = state(status)
+    synth = s["pcm"]["synthReports"]
+    assert s["triggers"]["l2"][0] == 5 and s["triggerRumbleUpdates"] == 2, s
+    time.sleep(1.1)
+    assert state(status)["pcm"]["synthReports"] == synth, "rumble kept rendering after release"
+    # Out of range values are clamped, not refused.
+    seq = neutral(sock, addr, seq, 0.3, 400, -50)
+    time.sleep(1.1)
+    s = state(status)
+    assert s["triggers"]["l2"][0] == 0x26 and s["dropped"] == 0, s
+    print("  ok    neutral motor packet: renders, moves a rumble trigger and stops like the motor report",
+          flush=True)
+    p.wait(timeout=15)
+finally:
+    if p.poll() is None:
+        p.terminate()
+        p.wait(timeout=3)
+    log.close()
+    sock.close()
+
 # A side cannot wait for itself.
 r = subprocess.run([str(root / "broker"), "--dry-run", "--pcm", "--token", token.hex(),
                     "--triggers", "R2:weapon+R2"], capture_output=True, timeout=5)
@@ -349,4 +393,4 @@ r = subprocess.run([str(root / "broker"), "--dry-run", "--pcm", "--token", token
                     "--triggers", "R2:max"], capture_output=True, timeout=5)
 assert r.returncode == 64, r.returncode
 print("==> dualsense per-title feedback: rumble haptics, trigger effects per side, waits, "
-      "two effects per side, precedence and refusal")
+      "two effects per side, the neutral motor packet, precedence and refusal")

@@ -49,7 +49,7 @@ report. The order after that is:
 | Session supervisor | `dualsense/launch.swift` `main` | Probes the pad, takes `sessions/controller.lock`, makes the token, starts the broker, passes the per-title options, runs the game. | Mostly. The probe result and the bypass reasons name the DualSense; eligibility is "exactly one Bluetooth DualSense, no USB one". |
 | Probe and open | `dualsense/broker.m` `openController` | Matches `054c:0ce6` and `054c:0df2` and counts the Bluetooth and USB ones. | No. |
 | Packet envelope | `dualsense/protocol.h` `DSBPacket` | Magic, token, pid, sequence, timestamp, two floats, 64 bytes. | Yes. |
-| Motor packets | `xinput/xinput-motors.c` `send_motors_locked`, `dinput/dinput-ff.c` | Motor values sent as a wired DualSense output report `0x02` with only the motor bytes valid. | No. The values are neutral; their encoding is Sony's. |
+| Motor packets | `xinput/xinput-motors.c` `send_motors_locked`, `dinput/dinput-ff.c` | Motor values sent as `DSB_MOTORS`: the two values in the envelope's floats, no report (step 1). | Yes. |
 | Source model | `broker.m` `receivePackets`, `rumbleHeld`, `moved` | Folds every source's motors, holds a value while its source is alive, deadband of 4/255. | Yes, but it lives beside the DualSense state (`dsb.pending`, a 47-byte Sony payload). |
 | Control writer | `broker.m` `outputWorker`, `Controls.h` `DSBControlDelta` | Bluetooth report `0x31` with CRC32 (seed `0xa2`); triggers, lightbar, player and mic LEDs. | No. |
 | PCM writer | `dualsense/PCMTransport.m` | Haptic reports `0x32` at about 47/s, input-rate check, suspends under 100 Hz. | No. |
@@ -220,7 +220,7 @@ Every step keeps the DualSense working. Each runs `make dualsense-check` and
 
 0. **Commit what exists** in reviewable pieces (the user's call), so the refactor
    has a base.
-1. **A neutral motor packet.** Add `DSB_MOTORS`; the XInput and DirectInput pieces
+1. **A neutral motor packet.** *Done.* Add `DSB_MOTORS`; the XInput and DirectInput pieces
    send it, and the broker accepts it beside the motor-only `0x02`.
    - Tests: `test-rumble-haptics.py` sends both forms and gets the same synth and
      motor results.

@@ -9,6 +9,11 @@
 // Dry run only: report[] is a Bluetooth input report 0x31 played in place of
 // the pad's own, for the trigger effects that read it.
 #define DSB_INPUT 4
+// The two motor values of a source that does not speak the pad's own reports
+// (the XInput and DirectInput pieces): `left` is the heavy motor and `right`
+// the light one, 0 to 1. `report` is unused. Whatever the pad, the broker
+// folds them with every other source's motors.
+#define DSB_MOTORS 5
 // report[0]: frame count (0=end, 30=10ms), report[1..3]: stream ID,
 // report[4..63]: 30 signed-8-bit stereo PCM frames at 3000 Hz.
 typedef struct __attribute__((packed)) {

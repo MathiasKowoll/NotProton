@@ -19,8 +19,8 @@
  *   - CreateEffect returns an effect object of ours. Its magnitude, gain and
  *     duration become the two motors: an effect on X drives the big left
  *     motor, one on Y the small right one, one on both drives both;
- *   - the motors go to the broker as a wired output report 0x02 with only the
- *     motor bytes valid, like an XInput title's vibration does.
+ *   - the motors go to the broker as a DSB_MOTORS datagram, like an XInput
+ *     title's vibration does.
  * Every other device and every other call is the original's, unchanged.
  */
 
@@ -69,7 +69,7 @@ static void logf_(const char *fmt, ...)
 
 /* controllers/dualsense/protocol.h, restated for a PE build. */
 #define DSB_MAGIC 0x31425344u
-#define DSB_OUTPUT 2
+#define DSB_MOTORS 5
 #pragma pack(push, 1)
 typedef struct {
     uint32_t magic, kind;
@@ -111,15 +111,13 @@ static void send_motors(BYTE left, BYTE right)
     static LONG sent, errors;
     memset(&p, 0, sizeof(p));
     p.magic = DSB_MAGIC;
-    p.kind = DSB_OUTPUT;
+    p.kind = DSB_MOTORS;
     memcpy(p.token, token, 16);
     p.pid = source;
     p.sequence = ++sequence;
     p.timestamp = cf_absolute_time();
-    p.report[0] = 0x02;
-    p.report[1] = 0x03;   /* motor values valid, haptics select */
-    p.report[3] = right;
-    p.report[4] = left;
+    p.left = left / 255.0f;   /* the heavy motor, 0 to 1 */
+    p.right = right / 255.0f; /* the light one */
     if (sendto(sock, (const char *)&p, sizeof(p), 0, (const struct sockaddr *)&dest, sizeof(dest)) == sizeof(p))
     {
         if ((left || right) && InterlockedIncrement(&sent) == 1)
