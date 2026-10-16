@@ -277,6 +277,82 @@ prefix_machine() {
   od -A n -t x2 -j "$((off + 4))" -N 2 "$dll" 2>/dev/null | tr -d ' \n'
 }
 
+# Whether a file is one of wine's own DLLs: wine marks them at offset 0x40.
+wine_builtin_dll() {
+  [ -f "$1" ] && [ "$(dd if="$1" bs=1 skip=64 count=16 2>/dev/null)" = "Wine builtin DLL" ]
+}
+
+# Writes a file through a temporary beside it, so nothing ever maps half of it.
+copy_whole() {  # copy_whole <from> <to>
+  if cp "$1" "$2.np-new" && mv -f "$2.np-new" "$2"; then return 0; fi
+  rm -f "$2.np-new"
+  return 1
+}
+
+# The controller bridge's Windows pieces (controllers/dualsense/*.dll) take the
+# place of wine's own in the prefix and are loaded as native. Each piece calls
+# <name>_np.dll for everything, and that is always the runner's own builtin:
+# never whatever the prefix held, which can be Microsoft's DirectX copy (Devil
+# May Cry 5's prefix had its xinput1_3.dll there). The prefix's own file is kept
+# as <name>_prefix.dll and goes back when the bridge is off. The pieces are
+# x86_64, so only an x86_64 prefix gets them; and the n,b override reaches
+# 32-bit processes too, so a syswow64 copy that is not wine's is swapped for the
+# runner's i386 builtin for the session and put back after. A piece names its
+# log file, C:\notproton-pad.log, which is how one is told from wine's. Adds the
+# names loaded as native to dsb_native.
+stage_controller_pieces() {  # <windows dir> <pieces dir> <runner lib/wine dir> <prefix machine> <bridge on: 1|0>
+  for name in mmdevapi xinput1_4 xinput1_3; do
+    live="$1/system32/$name.dll"
+    orig="$1/system32/${name}_np.dll"
+    saved="$1/system32/${name}_prefix.dll"
+    wow="$1/syswow64/$name.dll"
+    wow_saved="$1/syswow64/${name}_prefix.dll"
+    piece="$2/$name.dll"
+    builtin="$3/x86_64-windows/$name.dll"
+    ours=0
+    LC_ALL=C grep -q -a 'notproton-pad.log' "$live" 2>/dev/null && ours=1
+    # Earlier versions kept the prefix's own file as _np, and never wrote _prefix.
+    if [ -f "$orig" ] && [ ! -f "$saved" ]; then
+      mv -f "$orig" "$saved"
+    fi
+    if [ "$5" = 1 ] && [ "$4" = 8664 ] && [ -f "$piece" ] && wine_builtin_dll "$builtin" &&
+      { [ -f "$live" ] || [ -f "$saved" ]; }; then
+      if [ "$ours" = 0 ] && [ -f "$live" ]; then
+        copy_whole "$live" "$saved" || continue
+      fi
+      if ! cmp -s "$builtin" "$orig"; then
+        copy_whole "$builtin" "$orig" || continue
+      fi
+      if ! cmp -s "$piece" "$live"; then
+        if copy_whole "$piece" "$live"; then
+          echo "controllers: $name.dll staged, calling the runner's own as ${name}_np.dll" >> "$log" 2>&1 || true
+        else
+          continue
+        fi
+      fi
+      if [ -f "$wow" ] && ! wine_builtin_dll "$wow" && wine_builtin_dll "$3/i386-windows/$name.dll"; then
+        if copy_whole "$wow" "$wow_saved" && copy_whole "$3/i386-windows/$name.dll" "$wow"; then
+          echo "controllers: syswow64 $name.dll is not wine's; the runner's is used for this session" >> "$log" 2>&1 || true
+        fi
+      fi
+      dsb_native="${dsb_native:+$dsb_native,}$name"
+      continue
+    fi
+    if { [ "$ours" = 1 ] || [ ! -f "$live" ]; } && [ -f "$saved" ]; then
+      if copy_whole "$saved" "$live"; then
+        rm -f "$saved" "$orig"
+        echo "controllers: $name.dll restored to the prefix's own" >> "$log" 2>&1 || true
+      fi
+    elif [ "$ours" = 1 ] && wine_builtin_dll "$builtin" && copy_whole "$builtin" "$live"; then
+      rm -f "$orig"
+      echo "controllers: $name.dll restored to the runner's own" >> "$log" 2>&1 || true
+    fi
+    if [ -f "$wow_saved" ] && copy_whole "$wow_saved" "$wow"; then
+      rm -f "$wow_saved"
+    fi
+  done
+}
+
 tool_name() {
   case "$1" in
     aa64) printf 'the FEX build of CrossOver' ;;
@@ -1422,42 +1498,15 @@ if [ -n "${DSB_PORT:-}" ] && [ "$dsb_steam_pad" = 0 ]; then
   esac
   echo "controllers: pad as XInput=$dsb_xinput_pad (categories ${meta_categories:-unknown}, override ${NOTPROTON_PAD_XINPUT:-none})" >> "$log" 2>&1 || true
 fi
-# The bridge's Windows pieces (controllers/dualsense/*.dll) live in the prefix's
-# system32 and are loaded as native (see below). With the bridge on, the prefix's
-# own copy is kept as <name>_np.dll (each piece forwards to it) and the piece
-# takes its place; an older piece is replaced.
-# Without the bridge, the original goes back. Every version of a piece names
-# its log file, C:\notproton-pad.log, which is how one is told from wine's.
-dsb_sys32="${STEAM_COMPAT_DATA_PATH:-}/pfx/drive_c/windows/system32"
-if [ "$verb" = waitforexitandrun ] && [ -d "$dsb_sys32" ]; then
-  for dsb_name in mmdevapi xinput1_4 xinput1_3; do
-    dsb_piece="$np_support/controllers/dualsense/$dsb_name.dll"
-    dsb_dll="$dsb_sys32/$dsb_name.dll"
-    dsb_orig="$dsb_sys32/${dsb_name}_np.dll"
-    [ -f "$dsb_dll" ] || continue
-    dsb_ours=0
-    LC_ALL=C grep -q -a 'notproton-pad.log' "$dsb_dll" 2>/dev/null && dsb_ours=1
-    if [ -n "${DSB_PORT:-}" ] && [ -f "$dsb_piece" ]; then
-      if [ "$dsb_ours" = 0 ]; then
-        if cp -p "$dsb_dll" "$dsb_orig" && cp "$dsb_piece" "$dsb_dll"; then
-          echo "controllers: $dsb_name.dll staged, original kept as ${dsb_name}_np.dll" >> "$log" 2>&1 || true
-        fi
-      elif [ ! -f "$dsb_orig" ]; then
-        echo "controllers: $dsb_name.dll is a bridge piece without its original; left alone" >> "$log" 2>&1 || true
-      elif ! cmp -s "$dsb_piece" "$dsb_dll"; then
-        cp "$dsb_piece" "$dsb_dll" && echo "controllers: $dsb_name.dll updated" >> "$log" 2>&1 || true
-      fi
-      # A piece is a native DLL: without this, wine loads its own builtin from
-      # the runner and the prefix's copy is never used.
-      if LC_ALL=C grep -q -a 'notproton-pad.log' "$dsb_dll" 2>/dev/null && [ -f "$dsb_orig" ]; then
-        dsb_native="${dsb_native:+$dsb_native,}$dsb_name"
-      fi
-    elif [ "$dsb_ours" = 1 ] && [ -f "$dsb_orig" ]; then
-      cp -p "$dsb_orig" "$dsb_dll" && echo "controllers: $dsb_name.dll restored to the original" >> "$log" 2>&1 || true
-    fi
-  done
+# The bridge's Windows pieces: see stage_controller_pieces.
+dsb_native=""
+dsb_on=0
+[ -n "${DSB_PORT:-}" ] && dsb_on=1
+if [ "$verb" = waitforexitandrun ] && [ -d "${STEAM_COMPAT_DATA_PATH:-}/pfx/drive_c/windows/system32" ]; then
+  stage_controller_pieces "$STEAM_COMPAT_DATA_PATH/pfx/drive_c/windows" "$np_support/controllers/dualsense" \
+    "$CX_ROOT/lib/wine" "$(prefix_machine || true)" "$dsb_on"
 fi
-if [ -n "${dsb_native:-}" ]; then
+if [ -n "$dsb_native" ]; then
   export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}$dsb_native=n,b"
   echo "controllers: $dsb_native loaded from the prefix (n,b)" >> "$log" 2>&1 || true
 fi

@@ -126,6 +126,7 @@ jobs:
           make -s settingscheck
           make -s routecheck
           make -s bridgecheck
+          make -s padstagecheck
           make -s gamedrivecheck
           make -s launchercheck
           make -s seedcheck
