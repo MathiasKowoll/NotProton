@@ -32,6 +32,20 @@ jobs:
       - name: Install cross compilers
         run: brew install mingw-w64 bison flex
 
+      # The controller bridge's Windows pieces need llvm-mingw's clang: GNU ld
+      # cannot read their .def files' ordinal forwarders. Pinned by release and
+      # sha256.
+      - name: Install llvm-mingw
+        env:
+          LLVM_MINGW: llvm-mingw-20260616-ucrt-macos-universal
+          LLVM_MINGW_SHA256: 2cab02a2e964bd4aae981150a45985d07c657cfa8d244959eb9e2dcc5eedd7b1
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/$LLVM_MINGW.tar.xz" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/$LLVM_MINGW.tar.xz"
+          echo "$LLVM_MINGW_SHA256  $RUNNER_TEMP/$LLVM_MINGW.tar.xz" | shasum -a 256 -c -
+          tar -xJf "$RUNNER_TEMP/$LLVM_MINGW.tar.xz" -C "$RUNNER_TEMP"
+          echo "MINGW_BIN=$RUNNER_TEMP/$LLVM_MINGW/bin" >> "$GITHUB_ENV"
+
       - name: Clone Dobby at the pinned commit
         run: |
           git clone --no-checkout https://github.com/jmpews/Dobby.git vendor/dobby
