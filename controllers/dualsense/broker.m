@@ -85,6 +85,13 @@ static void receivePackets(int fd, const uint8_t token[16], double now, SessionM
                 break;
             }
         }
+        // A source silent for over 2 s has expired; one that speaks again under
+        // its id is a new instance (Wine reuses process ids) whose sequence starts
+        // over. Within the 2 s an older sequence is still a replay.
+        if (s && now - s->lastPacketAt > 2) {
+            memset(s, 0, sizeof(*s));
+            s->pid = p.pid;
+        }
         if (!s) {
             for (int k = 0; k < 64; k++) {
                 if (!sources[k].pid || now - sources[k].lastPacketAt > 2) {

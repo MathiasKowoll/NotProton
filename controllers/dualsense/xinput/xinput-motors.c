@@ -249,8 +249,10 @@ static BOOL CALLBACK init_broker(INIT_ONCE *o, void *param, void **ctx)
     dest.sin_family = AF_INET;
     dest.sin_port = htons((u_short)portnum);
     dest.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    /* Distinct from the bridge's own source, which is the Unix pid. */
-    source = 0x80000000u | GetCurrentProcessId();
+    /* Distinct from the bridge's own source, which is the Unix pid, and from the
+     * other build: a process can load both xinput1_3 and xinput1_4, each with its
+     * own sequence, and one id would make the broker drop one of them. */
+    source = (strstr(ORIG_DLL, "1_3") ? 0xA0000000u : 0x80000000u) | GetCurrentProcessId();
     {
         char flag[8], vendor[8], device[32];
         steam_pad = GetEnvironmentVariableA("DSB_STEAM_PAD", flag, sizeof(flag)) && !strcmp(flag, "1");
@@ -274,6 +276,33 @@ static BOOL CALLBACK init_broker(INIT_ONCE *o, void *param, void **ctx)
 
 /* ------------------------------------------------- which pad is the bridged one */
 
+/* XInputGetCapabilitiesEx tells the bridged pad by its vendor id. Wine's
+ * xinput1_3 has no such export (ordinals 1-8 and 100 only), so that build asks
+ * the runner's xinput1_4, which the run script keeps beside it as
+ * xinput1_4_np.dll; both list the HID devices in the order Wine enumerates them
+ * (inferred, not measured). */
+static get_caps_ex_fn caps_ex_fn;
+
+static BOOL CALLBACK find_caps_ex(INIT_ONCE *o, void *param, void **ctx)
+{
+    HMODULE other;
+    caps_ex_fn = (get_caps_ex_fn)orig_proc("XInputGetCapabilitiesEx");
+    if (caps_ex_fn) return TRUE;
+    if ((other = LoadLibraryA("xinput1_4_np.dll")))
+        caps_ex_fn = (get_caps_ex_fn)GetProcAddress(other, "XInputGetCapabilitiesEx");
+    logf_(caps_ex_fn ? "%s has no XInputGetCapabilitiesEx; vendor ids come from xinput1_4_np.dll"
+                     : "no XInputGetCapabilitiesEx in %s or xinput1_4_np.dll; vibration stays wine's",
+          ORIG_DLL);
+    return TRUE;
+}
+
+static get_caps_ex_fn caps_ex(void)
+{
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    InitOnceExecuteOnce(&once, find_caps_ex, NULL, NULL);
+    return caps_ex_fn;
+}
+
 static int bridged[4];       /* 0 unknown, 1 the bridged pad's vendor, -1 other */
 static DWORD bridged_checked[4];
 
@@ -283,7 +312,7 @@ static BOOL is_bridged(DWORD index)
     if (index >= 4) return FALSE;
     if (!bridged[index] || now - bridged_checked[index] > 5000)
     {
-        ORIG(get_caps_ex_fn, "XInputGetCapabilitiesEx");
+        get_caps_ex_fn p_ = caps_ex();
         XCAPSEX caps;
         int was = bridged[index];
         memset(&caps, 0, sizeof(caps));
