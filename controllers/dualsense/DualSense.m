@@ -554,6 +554,12 @@ static void dualSenseTrigger(int side, uint8_t kind, uint8_t strength) {
 }
 
 static bool dualSenseFailed(void) {
+    // A writer that ended while it should still run is a stall whatever ended it:
+    // nothing else writes to the pad for the rest of the session.
+    if (atomic_load(&dsb.workerExited) && atomic_load(&dsb.workerRunning) &&
+        !atomic_exchange(&dsb.stalled, true)) {
+        fprintf(stderr, "Output writer ended while the session runs\n");
+    }
     return DSBOutputWriteTimedOut() || atomic_load(&dsb.stalled);
 }
 

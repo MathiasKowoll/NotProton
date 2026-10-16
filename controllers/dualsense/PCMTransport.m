@@ -168,8 +168,23 @@ void DSBPCMReceive(const DSBPacket *p) {
     pthread_mutex_unlock(&dsb.outputLock);
     DSBPCMNotify();
 }
+// Dry runs only: the Nth write sees stale input (DSB_TEST_STALE_WRITE), which a
+// dry transport can never produce on its own.
+static unsigned pcmTestStaleWrite;
+
 static bool pcmWrite(uint8_t *b, unsigned n) {
-    if (atomic_load(&dsb.stalled) || !inputAlive()) {
+    static unsigned testWrites;
+    if (atomic_load(&dsb.stalled)) {
+        return false;
+    }
+    // Every caller ends the worker on false. Input that went stale between the
+    // loop's check and this write is a stall, as the loop already treats it while
+    // streaming: a worker that ended without one left the session running with
+    // no writer, and nothing restarted it.
+    if (!inputAlive() || (pcmTestStaleWrite && ++testWrites >= pcmTestStaleWrite)) {
+        if (!atomic_exchange(&dsb.stalled, true)) {
+            fprintf(stderr, "PCM stopped: controller input stale at a write\n");
+        }
         return false;
     }
     double start = monotonicNow();
@@ -207,6 +222,9 @@ void *DSBPCMWorker(void *unused) {
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
         mach_timebase_info(&pcmTimebase);
         pcmDeferTestTimers = session.dry && getenv("DSB_TEST_DEFER_TIMERS") != NULL;
+        if (session.dry && getenv("DSB_TEST_STALE_WRITE")) {
+            pcmTestStaleWrite = (unsigned)strtoul(getenv("DSB_TEST_STALE_WRITE"), NULL, 10);
+        }
         kern_return_t semResult = semaphore_create(mach_task_self(), &pcmWake, SYNC_POLICY_FIFO, 0);
         if (semResult) {
             fprintf(stderr, "PCM wake semaphore failed: %d\n", semResult);

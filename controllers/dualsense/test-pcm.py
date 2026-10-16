@@ -167,3 +167,34 @@ finally:
         p.wait(timeout=3)
     log.close()
     sock.close()
+
+if not hardware:
+    # A write that finds the pad's input stale ends the session as a stall (exit
+    # 11, which launch restarts), never as a silent end of the writer.
+    stale_log = root / "pcm-stale.log"
+    stale_status = root / "pcm-stale-status.json"
+    with stale_log.open("w") as err:
+        p = subprocess.Popen(
+            [str(root / "broker"), "--pcm", "--dry-run", "--token", token.hex(), "--seconds", "5",
+             "--status", str(stale_status)],
+            stdout=subprocess.PIPE, stderr=err, text=True,
+            env=dict(os.environ, DSB_TEST_STALE_WRITE="5"),
+        )
+        try:
+            ready = json.loads(p.stdout.readline())
+            addr = ("127.0.0.1", ready["port"])
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                report = bytes([30, 1, 0, 0]) + bytes([16, 240]) * 30
+                for seq in range(1, 60):
+                    s.sendto(packet(seq, report), addr)
+                    time.sleep(0.01)
+                    if p.poll() is not None:
+                        break
+            p.wait(timeout=5)
+        finally:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(timeout=3)
+    assert p.returncode == 11, (p.returncode, stale_log.read_text())
+    assert "input stale at a write" in stale_log.read_text(), stale_log.read_text()
+    print("  ok    PCM: input stale at a write ends the session as a stall (exit 11)", flush=True)
