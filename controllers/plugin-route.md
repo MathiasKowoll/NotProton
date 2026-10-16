@@ -34,7 +34,8 @@ directory when Steam loads the page; the run script reads it on every launch.
 
 - **Launch:**
   - Static environment variables.
-  - One injected dylib per descriptor, appended to `DYLD_INSERT_LIBRARIES`
+  - One injected dylib per descriptor, appended to `STEAM_DYLD_INSERT_LIBRARIES`,
+    which the run script hands to the game as `DYLD_INSERT_LIBRARIES`
     (compat_run.sh:1522-1544).
   - It cannot wrap the command, run a process before or after the game, compute
     a value at launch, or forward a variable it did not list.

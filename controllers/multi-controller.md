@@ -1,7 +1,8 @@
 # More controller types for the bridge
 
-A study, written against build `1.1.8-mgvf.71b16ed+options+pr90.26`. Nothing in
-this note is implemented. It answers two questions:
+A study, written against build `1.1.8-mgvf.71b16ed+options+pr90.26`. Steps 1 to
+4 below have since been implemented on branch `controllers`, each marked Done;
+the rest is study. It answers two questions:
 
 - Can the per-title features built for the DualSense also serve other pads, such
   as Nintendo's Switch Pro Controller and Joy-Cons, or Xbox pads?
@@ -20,15 +21,17 @@ is marked:
 Most of what makes the per-title features work is already device-neutral:
 
 - the session supervision;
-- the motor model (sources, hold, deadband);
+- the motor model (sources and hold; the deadband is still the DualSense
+  backend's);
 - the per-title options and their grammar;
 - the Steam panel and the suggested options;
 - the XInput pad presentation as a concept.
 
 The DualSense-only parts are the HID formats and the outputs only a DualSense has.
 
-Vibration already reaches any pad Steam supports on the Steam Input route, through
-`controllers/steam-input/rumble.dylib`. Only the DualSense has been measured there.
+On the Steam Input route, `controllers/steam-input/rumble.dylib` hands vibration
+to Steam, which should render it on any pad it supports. Only the DualSense has
+been measured there; other pads are **to measure**.
 
 On the direct route, the motor values are neutral. Only the final write is per
 device.
@@ -49,7 +52,7 @@ report. The order after that is:
 | Session supervisor | `dualsense/launch.swift` `main` | Probes the pad, takes `sessions/controller.lock`, makes the token, starts the broker, passes the per-title options, runs the game. | Mostly. The probe result and the bypass reasons name the DualSense; eligibility is "exactly one Bluetooth DualSense, no USB one". |
 | Probe and open | `dualsense/DualSense.m` `openController` | Matches `054c:0ce6` and `054c:0df2` and counts the Bluetooth and USB ones. | No. |
 | Packet envelope | `dualsense/protocol.h` `DSBPacket` | Magic, token, pid, sequence, timestamp, two floats, 64 bytes. | Yes. |
-| Motor packets | `xinput/xinput-motors.c` `send_motors_locked`, `dinput/dinput-ff.c` | Motor values sent as `DSB_MOTORS`: the two values in the envelope's floats, no report (step 1). | Yes. |
+| Motor packets | `xinput/xinput-motors.c` `send_motors_locked` | Motor values sent as `DSB_MOTORS`: the two values in the envelope's floats, no report (step 1). | Yes. |
 | Source model | `broker.m` `receivePackets`, `rumbleHeld`, `updateEffects` | Folds every source's motors and haptic-audio envelope, and holds a value while its source is alive. | Yes: the core since step 2. The deadband (`moved`) is the DualSense backend's. |
 | Control writer | `DualSense.m` `outputWorker`, `Controls.h` `DSBControlDelta` | Bluetooth report `0x31` with CRC32 (seed `0xa2`); triggers, lightbar, player and mic LEDs. | No. |
 | PCM writer | `dualsense/PCMTransport.m` | Haptic reports `0x32` at about 47/s, input-rate check, suspends under 100 Hz. | No. |
@@ -60,7 +63,7 @@ report. The order after that is:
 | Core Haptics channels | `HapticChannel.m` (`DSBHapticOpen`, `DSBHapticSet`, `DSBHapticRenew`) | One engine per locality playing a continuous event whose intensity follows a level. Used by the DualSense without PCM (the handles) and by the GameController backend (handles and triggers). | Yes, since step 4. |
 | HID presentation | `dualsense/bridge.m` | Inside Wine: presents the Bluetooth pad as a USB one (descriptor, report sizes, transport, the Edge as a standard pad); answers feature `08/02`; turns input `0x31` into `0x01`; sends output `0x02` to the broker. | No. Games speak Sony HID to a DualSense. |
 | Haptic audio endpoint | `dualsense/AudioFacade.m`, `mmdevapi/mmdevapi-container.c` | A 4-channel endpoint for haptic audio, and its ContainerId. | No. |
-| XInput pad | `xinput-motors.c` `init_pad`, `open_pad`, `pad_reader` | Builds an XInput pad from the pad's HID input reports. Forwards vibration only for vendor `054c`. | The presentation is neutral. Input decoding and the vendor gate are Sony. |
+| XInput pad | `xinput-motors.c` `init_pad`, `open_pad`, `pad_reader` | Builds an XInput pad from the pad's HID input reports. Forwards vibration only for the bridged pad's vendor (`DSB_VENDOR`, `054c` for a DualSense). | The presentation is neutral. Input decoding and the vendor gate are Sony. |
 | Steam Input rumble | `steam-input/rumble.cpp`, `SteamSession.h` | Forwards the rumble of Steam's virtual pad to `ISteamController::TriggerVibration`. | Yes. Steam renders it on whatever pad it holds. |
 | Run script | `dylib/feats/compat_run.sh` `plan_hidden_controllers`, the XInput-pad decision | Writes `Hidraw=0` for the pads Steam handles. The Nintendo ids `057e/2006`, `2007`, `2009` get it even with Steam Input off. Picks the XInput pad from store category 57. | Partly. Category 57 is "PS5 controller support", a Sony signal. |
 | Panel and suggestions | `dylib/feats/webpatch.c` `NP_CX_CONTROLLER_*`, `suggested-options.json` | Writes the launch options. | Mostly. Labels name the DualSense; `NOTPROTON_PAD_AS` is Sony-only. |
@@ -69,7 +72,7 @@ report. The order after that is:
 
 | Pad | Motors | Fine haptics | Trigger effects | Lights | Today on this stack |
 |---|---|---|---|---|---|
-| DualSense, DualSense Edge | 2 | Voice coils: PCM `0x32` on Bluetooth, or haptic audio. **Measured.** | Resistance, weapon, vibration modes. **Measured.** | Lightbar, player LEDs. **Measured.** | Full bridge. |
+| DualSense, DualSense Edge | 2 | Voice coils: PCM `0x32` on Bluetooth, or haptic audio. **Measured** (sessions in `dualsense/per-title-feedback.md`). | Resistance, weapon, vibration modes. **Measured** (same). | Lightbar, player LEDs. **Measured** (same). | Full bridge. |
 | DualShock 4 | 2 | None | None | Lightbar | Steam Input route only. Bluetooth output report `0x11` with CRC: **documented** (Linux `hid-playstation` and `hid-sony`). |
 | Switch Pro Controller (`057e:2009`) | Two linear actuators ("HD rumble") | Each takes a high-band and a low-band frequency and amplitude per update: **documented** (community reverse-engineering of output reports `0x10` and `0x01`). | None: ZL and ZR are digital. | Player LEDs, home LED, through subcommands: **documented**. | Wine is kept off its hidraw (`Hidraw=0`) unless direct access is on. The run script's comment says this keeps most games' controller support working. Rumble on either route: **to measure**. |
 | Joy-Con (`057e:2006`, `2007`) | One actuator each, as the Pro | As the Pro | None | Player LEDs | As the Pro, and a pair is two devices. **To measure.** |
@@ -101,7 +104,7 @@ core file:
 
 - The supervisor: `launch.swift`, without the DualSense eligibility rule.
 - The packet envelope.
-- The source model and the deadband.
+- The source model. (The deadband stayed in the DualSense backend.)
 - The per-title options:
   - the rumble-haptics decision;
   - the trigger spec, the active choice and the waits;
@@ -119,8 +122,9 @@ Built in step 2. A backend is the only writer to its pad. Its interface is
 | Member | What the core asks of it |
 |---|---|
 | `argument` | A flag only this backend knows (the DualSense's `--pcm`, `--trigger-reset-grace-ms`). |
-| `open` | Probe (one JSON line about the pads present) or open the pad; an exit status on failure. |
-| `abilities` | What the opened pad can do: `DSB_CAN_HAPTICS` (rumble on fine haptics), `DSB_CAN_AUDIO` (haptic audio as a stream), `DSB_CAN_READ_TRIGGERS` (trigger positions for waits). |
+| `probe` | One JSON line about the pads present, and whether this backend can take one. |
+| `open` | Open the pad; an exit status on failure. |
+| `abilities` | What the opened pad can do, as `DSB_CAN_*` bits in `Session.h`: rumble on fine haptics (`HAPTICS`), haptic audio as a stream (`AUDIO`), trigger positions for waits (`READ_TRIGGERS`), resisting the pull (`TRIGGER_FORCE`) and vibrating a trigger (`TRIGGER_RUMBLE`). |
 | `realTime` | Whether the run loop wakes on the socket every 2 ms (PCM) or turns every 10 ms. |
 | `start` | Start writing once the socket exists. |
 | `accepts`, `receive` | Packets only this pad understands: a game's own output report, haptic audio, and in a dry run a pad input report. `receive` says which trigger sides a game wrote and which motor values it set. |
@@ -143,8 +147,9 @@ What the core does with it (`broker.m`):
 
 Not yet done:
 
-- Dry runs still go through the DualSense backend, so the tests read Sony bytes.
-  A recording backend would let the core's tests check calls instead.
+- Dry runs go through a real backend (the DualSense's, or the GameController
+  one when named), so the core's tests read that backend's output. A recording
+  backend would let them check calls instead.
 - Lights are left out of the interface. On the DualSense, games and Steam write
   them, and the bridge passes them through.
 
@@ -153,7 +158,8 @@ Not yet done:
 Done in step 1. `DSB_MOTORS` carries the two motor values in the envelope's
 `left` and `right` floats and nothing in `report`:
 
-- `xinput-motors.c` and `dinput-ff.c` send it.
+- `xinput-motors.c` sends it. (A DirectInput force-feedback piece was written
+  and never built; it was removed.)
 - `DSB_OUTPUT` stays for what it really is: a game's own DualSense output report,
   which only the DualSense backend reads.
 
@@ -199,8 +205,8 @@ another pad needs the same rule.
 ## What the vibration work can do for any controller
 
 **Steam Input route.** `rumble.dylib` already forwards a game's XInput rumble on
-Steam's virtual pad to Steam, and Steam renders it on the physical pad: motors on
-an Xbox pad, HD rumble on a Switch pad.
+Steam's virtual pad to Steam, which renders it on the physical pad. On an Xbox
+pad that should be its motors and on a Switch pad HD rumble (**to measure**).
 - Measured with a DualSense: INVERSUS Deluxe (see the adapter's README) and
   Wo Long: Fallen Dynasty.
 - Other pads: to measure. This is the cheapest test of the question: a Switch Pro
@@ -265,8 +271,8 @@ Every step keeps the DualSense working. Each runs `make dualsense-check` and
    - **Waits.** They read `extendedGamepad` trigger values.
    - **Inside Wine.** The launcher gives such a session neither the PCM transport
      nor `bridge.dylib`. The XInput piece sends the pad's XInput vibration to the
-     broker alone (`DSB_DEVICE` other than `dualsense`), so Wine does not write
-     to its motors too.
+     broker alone (`DSB_DEVICE` other than `dualsense`), so that Wine does not
+     write to its motors too (**to measure**: the backend has not run on a pad).
    - **Tests.** A dry run checks the handles, the triggers while pressed, the
      declines and the waits (`test-rumble-haptics.py`). The launcher test checks
      the opt-in and that the DualSense's bridge stays out.

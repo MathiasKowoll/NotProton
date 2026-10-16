@@ -1477,7 +1477,9 @@ if [ -n "${DSB_ROUTE:-}" ]; then
   echo "controllers: bridge route $DSB_ROUTE" >> "$log" 2>&1 || true
 fi
 # NOTPROTON_PAD_STEAM_INPUT=1 (with direct access and Steam Input on): for a title
-# that reads the pad only through Steam Input (Wo Long, Dynasty Warriors: Origins).
+# that reads the pad only through Steam Input (measured with Wo Long; its suggestion,
+# like Dynasty Warriors: Origins', is now direct access off with Steam Input on,
+# which needs none of this).
 # Steam keeps the input; the vibration the title sends to Steam's virtual pad
 # through XInput goes to the bridged pad instead of Steam's own emulation.
 dsb_steam_pad=0

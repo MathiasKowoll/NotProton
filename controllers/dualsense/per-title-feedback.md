@@ -12,7 +12,8 @@ more than the legacy motors. Neither is the game's own authored effect.
 | `NOTPROTON_PAD_TRIGGERS=<spec>` | An effect on one trigger or both, with an optional strength. |
 
 Both take effect only in a bridged session (`NOTPROTON_RAW_CONTROLLERS=1`, one
-DualSense over Bluetooth). The launcher passes them to the broker as
+DualSense or DualSense Edge over Bluetooth, or the pad the opt-in GameController
+backend takes). The launcher passes them to the broker as
 `--rumble-haptics` and `--triggers <spec>`. A spec the launcher does not
 understand is not passed on, a spec the broker does not understand ends it
 with status 64, and `--rumble-haptics` without the PCM transport is declined
@@ -34,8 +35,9 @@ The PCM writer is the only thing that writes to the pad, and its rule is:
 - **Real haptic audio wins.** If a game sends haptic audio, the writer plays
   it exactly as before and nothing is synthesized.
 - **Otherwise, while a motor value is at least 4 of 255, it renders one.**
-  Under that is the motors path's deadband: it would only keep a stream of
-  silence open. Games ramp a rumble out through such values (God of War
+  Under 4 nothing is rendered: such a value would only keep a stream of
+  near-silence open. (The motors path has a separate rule of the same size: it
+  skips a change of less than 4.) Games ramp a rumble out through such values (God of War
   Ragnarök sends 13, 9, 8 ... 1). The heavy
   left motor becomes a 65 Hz tone on the left actuator and the light right
   motor a 160 Hz tone on the right one (`DSBRumbleSynthBlock` in `PCM.h`),
@@ -76,10 +78,10 @@ layouts in `Controls.h`, the same modes games write through libScePad:
 | `slope` | 0x21 feedback | from zone 2, rising per zone up to the strength | 8 |
 | `vibrate` | 0x26 vibration | 25 Hz from zone 2 | 3 |
 | `rumble` | 0x26 vibration | 40 Hz, amplitude follows the game's heavy (L2) or light (R2) motor | 8 (the top) |
-| `off` | 0x05 off | nothing | - |
+| `off` | none at the start; 0x05 off when a wait ends the side's other effect | the trigger is left to the game | - |
 
 `light`, `medium` and `strong` remain as names for `resist` at strengths 2, 4
-and 6 (zones 4, 3 and 2).
+and 6, all from zone 3 as `resist` itself.
 
 Each side may also have a second choice, ending in `+L2` or `+R2` to name the
 other trigger, which replaces the first while that trigger is pressed.
@@ -189,10 +191,11 @@ both sides, since the launcher drops it whole.
 
 `make panel-behavior` runs `dylib/tests/panel-behavior/controllers.js`: the
 rows appear only with direct access, each writes and reads back its launch
-option, every trigger value the panel composes matches the broker's grammar,
-and each trigger's line follows its choices.
+option, every trigger value the panel composes matches the grammar the launcher
+and the broker accept (the test checks a JavaScript copy of it), and each
+trigger's line follows its choices.
 
-On a pad, check these three:
+On a pad, check these:
 
 - How it feels compared with the motors.
 - The broker status's `pcm.synthReports` and `hidErrors`.

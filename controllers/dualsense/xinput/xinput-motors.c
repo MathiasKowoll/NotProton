@@ -1,16 +1,15 @@
 /*
  * xinput-motors.c -- XInput vibration for a bridged Sony pad.
  *
- * Installed into a runner as xinput1_4.dll, with the runner's own xinput1_4.dll
- * kept beside it as xinput1_4_np.dll. Every export is the original's, called
- * unchanged.
+ * Staged into the prefix's system32 as xinput1_4.dll (and, built again,
+ * xinput1_3.dll), calling the runner's own as xinput1_4_np.dll. Every export
+ * calls the original; XInputSetState also sends the motors on, and with
+ * DSB_XINPUT_PAD the presented pad answers for its slot.
  *
- * With "Let games read controllers directly" the DualSense reaches the game as
- * a HID device, and wine's xinput reports it as a pad. A title that reads the
- * pad through XInput (Unreal's XInputInterface, CONTROL) then asks for
- * vibration with XInputSetState, and wine's xinput has nowhere to put it: the
- * pad's descriptor has no haptics collection. Adaptive triggers still work
- * because the game writes them to the pad itself.
+ * A title that drives a Sony pad through XInput asks for vibration with
+ * XInputSetState, and wine's xinput has nowhere to put it: the pad's
+ * descriptor has no haptics collection. Adaptive triggers still work because
+ * the game writes them to the pad itself.
  *
  * The controller bridge already has a single writer to the pad, the broker,
  * which merges every source and owns the Bluetooth output budget. So the
