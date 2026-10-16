@@ -1,8 +1,9 @@
 /*
  * mmdevapi-container.c -- give the bridge's haptic endpoint the pad's container.
  *
- * Installed into a runner as mmdevapi.dll, with the runner's own mmdevapi.dll
- * kept beside it as mmdevapi_np.dll. Every export is the original's.
+ * Staged into a prefix as mmdevapi.dll, with the runner's own mmdevapi.dll
+ * kept beside it as mmdevapi_np.dll. Every export but DllGetClassObject is a
+ * forwarder to the original.
  *
  * On Windows a DualSense on a cable is one container: its HID interface and
  * its four-channel audio endpoint report the same DEVPKEY_Device_ContainerId,
@@ -26,7 +27,6 @@
 #include <windows.h>
 #include <objbase.h>
 #include <mmdeviceapi.h>
-#include <audioclient.h>
 #include <propsys.h>
 #include <setupapi.h>
 #include <stdio.h>
@@ -150,17 +150,24 @@ static BOOL container_of(const WCHAR *prefix, GUID *out, WCHAR *found_id, DWORD 
 static BOOL pad_container(GUID *out)
 {
     DWORD now = GetTickCount();
-    BOOL ok;
+    BOOL ok, first, refresh;
 
+    /* The first reading holds the lock, so no caller answers before there is
+     * one; later ones walk the device tree without it, so a game reading other
+     * properties never waits on the walk. One caller takes each refresh. */
     EnterCriticalSection(&lock);
-    if (!pad_read_at || now - pad_read_at > 2000)
+    first = !pad_read_at;
+    refresh = first || now - pad_read_at > 2000;
+    if (refresh) pad_read_at = now | 1;
+    if (refresh && !first) LeaveCriticalSection(&lock);
+    if (refresh)
     {
         WCHAR id[512], text[40];
         GUID guid;
         BOOL found = container_of(L"HID\\", &guid, id, ARRAY_SIZE(id))
                      || container_of(L"USB\\", &guid, id, ARRAY_SIZE(id));
 
-        pad_read_at = now;
+        if (!first) EnterCriticalSection(&lock);
         if (found && (!pad_known || !IsEqualGUID(&guid, &pad_guid)))
         {
             StringFromGUID2(&guid, text, ARRAY_SIZE(text));
@@ -192,44 +199,10 @@ static BOOL is_bridge(IPropertyStore *store)
     return bridge;
 }
 
-/* Measurement: every distinct (endpoint, key) a game reads, and what wine had. */
-static void note_read(IPropertyStore *store, REFPROPERTYKEY key, HRESULT hr, const PROPVARIANT *pv)
-{
-    static struct { WCHAR dev[64]; GUID fmtid; DWORD pid; } seen[160];
-    static LONG count;
-    PROPVARIANT path;
-    WCHAR dev[64] = L"?";
-    LONG i, n;
-
-    if (!key) return;
-    PropVariantInit(&path);
-    if (SUCCEEDED(real_GetValue(store, &name_key, &path)) && path.vt == VT_LPWSTR && path.pwszVal)
-        lstrcpynW(dev, path.pwszVal, ARRAY_SIZE(dev));
-    PropVariantClear(&path);
-    EnterCriticalSection(&lock);
-    n = count;
-    for (i = 0; i < n; i++)
-        if (seen[i].pid == key->pid && IsEqualGUID(&seen[i].fmtid, &key->fmtid) && !wcscmp(seen[i].dev, dev))
-            break;
-    if (i == n && n < (LONG)ARRAY_SIZE(seen))
-    {
-        WCHAR g[40];
-        lstrcpyW(seen[n].dev, dev);
-        seen[n].fmtid = key->fmtid;
-        seen[n].pid = key->pid;
-        count = n + 1;
-        StringFromGUID2(&key->fmtid, g, 40);
-        logf_("read %ls,%lu of [%ls] -> 0x%08lx vt %u", g, key->pid, dev, hr, pv ? pv->vt : 0);
-    }
-    LeaveCriticalSection(&lock);
-}
-
 static HRESULT WINAPI my_GetValue(IPropertyStore *store, REFPROPERTYKEY key, PROPVARIANT *pv)
 {
     HRESULT hr = real_GetValue(store, key, pv);
     GUID container;
-
-    note_read(store, key, hr, pv);
 
     if (SUCCEEDED(hr) && key && pv && pv->vt == VT_EMPTY
         && IsEqualGUID(&key->fmtid, &container_key.fmtid) && key->pid == container_key.pid
@@ -256,12 +229,10 @@ static BOOL patch_slot(void **vt, int slot, void *mine, void **saved)
     return TRUE;
 }
 
-static void watch_clients(IMMDevice *device);
-
 /* Every endpoint's property store shares wine's one vtable: patch it once,
  * through a store opened on any endpoint. */
-/* Keeps this DLL loaded for the life of the process: the property stores and
- * clients patched below point into it. Called from the first use of the
+/* Keeps this DLL loaded for the life of the process: the property store patched
+ * below points into it. Called from the first use of the
  * enumerator, never from DllMain. */
 static void pin_self(void)
 {
@@ -307,7 +278,6 @@ static BOOL CALLBACK install(INIT_ONCE *once, void *param, void **ctx)
                     logf_("could not patch the property store");
                 IPropertyStore_Release(store);
             }
-            watch_clients(device);
             IMMDevice_Release(device);
         }
         IMMDeviceCollection_Release(all);
@@ -315,129 +285,6 @@ static BOOL CALLBACK install(INIT_ONCE *once, void *param, void **ctx)
     if (FAILED(hr)) logf_("endpoint walk failed (0x%08lx)", hr);
     IMMDeviceEnumerator_Release(devices);
     return TRUE;
-}
-
-/* --------------------------------------------- measurement: the client */
-
-/* What a game does with an audio client on the bridge's endpoint: whether
- * Initialize succeeds and whether it ever starts the stream. */
-typedef HRESULT (WINAPI *activate_fn)(IMMDevice *, REFIID, DWORD, PROPVARIANT *, void **);
-typedef HRESULT (WINAPI *initialize_fn)(IAudioClient *, AUDCLNT_SHAREMODE, DWORD, REFERENCE_TIME,
-                                        REFERENCE_TIME, const WAVEFORMATEX *, LPCGUID);
-typedef HRESULT (WINAPI *client_fn)(IAudioClient *);
-typedef HRESULT (WINAPI *get_service_fn)(IAudioClient *, REFIID, void **);
-typedef HRESULT (WINAPI *format_supported_fn)(IAudioClient *, AUDCLNT_SHAREMODE, const WAVEFORMATEX *,
-                                              WAVEFORMATEX **);
-static activate_fn real_Activate;
-static initialize_fn real_Initialize;
-static client_fn real_Start;
-static get_service_fn real_GetService;
-static format_supported_fn real_IsFormatSupported;
-static void *bridge_clients[64];
-static LONG bridge_next, activations, initializes, starts;
-
-static BOOL bridge_client(void *client)
-{
-    int i;
-    for (i = 0; i < 64; i++) if (bridge_clients[i] == client) return TRUE;
-    return FALSE;
-}
-
-static HRESULT WINAPI my_Activate(IMMDevice *device, REFIID iid, DWORD ctx, PROPVARIANT *params, void **out)
-{
-    HRESULT hr = real_Activate(device, iid, ctx, params, out);
-    IPropertyStore *store = NULL;
-    BOOL bridge = FALSE;
-
-    if (SUCCEEDED(hr) && out && *out && SUCCEEDED(IMMDevice_OpenPropertyStore(device, STGM_READ, &store)))
-    {
-        bridge = is_bridge(store);
-        IPropertyStore_Release(store);
-    }
-    if (bridge)
-    {
-        WCHAR g[40];
-        LONG n = InterlockedIncrement(&activations);
-        StringFromGUID2(iid, g, 40);
-        if (n <= 5 || !(n % 100)) logf_("bridge endpoint activated #%ld as %ls -> 0x%08lx", n, g, hr);
-        bridge_clients[InterlockedIncrement(&bridge_next) & 63] = *out;
-    }
-    return hr;
-}
-
-static HRESULT WINAPI my_Initialize(IAudioClient *client, AUDCLNT_SHAREMODE mode, DWORD flags, REFERENCE_TIME duration,
-                                    REFERENCE_TIME period, const WAVEFORMATEX *fmt, LPCGUID session)
-{
-    HRESULT hr = real_Initialize(client, mode, flags, duration, period, fmt, session);
-    if (bridge_client(client))
-    {
-        LONG n = InterlockedIncrement(&initializes);
-        if (n <= 5 || !(n % 100) || FAILED(hr))
-        {
-            static LONG failures;
-            if (SUCCEEDED(hr) || InterlockedIncrement(&failures) <= 10)
-                logf_("bridge Initialize #%ld mode %d flags %08lx dur %lld: %u ch %lu Hz %u bit tag %04x -> 0x%08lx",
-                      n, mode, flags, (long long)duration, fmt ? fmt->nChannels : 0, fmt ? fmt->nSamplesPerSec : 0,
-                      fmt ? fmt->wBitsPerSample : 0, fmt ? fmt->wFormatTag : 0, hr);
-        }
-    }
-    return hr;
-}
-
-static HRESULT WINAPI my_IsFormatSupported(IAudioClient *client, AUDCLNT_SHAREMODE mode, const WAVEFORMATEX *fmt,
-                                           WAVEFORMATEX **closest)
-{
-    HRESULT hr = real_IsFormatSupported(client, mode, fmt, closest);
-    static LONG said;
-    if (bridge_client(client) && InterlockedIncrement(&said) <= 10)
-        logf_("bridge IsFormatSupported mode %d: %u ch %lu Hz %u bit -> 0x%08lx", mode,
-              fmt ? fmt->nChannels : 0, fmt ? fmt->nSamplesPerSec : 0, fmt ? fmt->wBitsPerSample : 0, hr);
-    return hr;
-}
-
-static HRESULT WINAPI my_Start(IAudioClient *client)
-{
-    HRESULT hr = real_Start(client);
-    if (bridge_client(client))
-    {
-        LONG n = InterlockedIncrement(&starts);
-        if (n <= 5 || FAILED(hr)) logf_("bridge Start #%ld -> 0x%08lx", n, hr);
-    }
-    return hr;
-}
-
-static HRESULT WINAPI my_GetService(IAudioClient *client, REFIID iid, void **out)
-{
-    HRESULT hr = real_GetService(client, iid, out);
-    static LONG said;
-    if (bridge_client(client) && InterlockedIncrement(&said) <= 10)
-    {
-        WCHAR g[40];
-        StringFromGUID2(iid, g, 40);
-        logf_("bridge GetService %ls -> 0x%08lx", g, hr);
-    }
-    return hr;
-}
-
-static void watch_clients(IMMDevice *device)
-{
-    IAudioClient *client = NULL;
-    void **vt = *(void ***)device;
-    HRESULT hr;
-
-    if (!patch_slot(vt, 3, (void *)my_Activate, (void **)&real_Activate)) return;
-    if (FAILED(hr = real_Activate(device, &IID_IAudioClient, CLSCTX_INPROC_SERVER, NULL, (void **)&client)))
-    {
-        logf_("no audio client to watch (0x%08lx)", hr);
-        return;
-    }
-    vt = *(void ***)client;
-    patch_slot(vt, 3, (void *)my_Initialize, (void **)&real_Initialize);
-    patch_slot(vt, 7, (void *)my_IsFormatSupported, (void **)&real_IsFormatSupported);
-    patch_slot(vt, 10, (void *)my_Start, (void **)&real_Start);
-    patch_slot(vt, 14, (void *)my_GetService, (void **)&real_GetService);
-    IAudioClient_Release(client);
-    logf_("audio clients watched");
 }
 
 /* ---------------------------------------------------------------- exports */
