@@ -135,6 +135,12 @@ static inline void DSBTriggerActive(const DSBTriggerSpec *t, int side, bool held
     *strength = second ? t->heldStrength[side] : t->strength[side];
 }
 
+// The kinds that resist the pull. A pad whose triggers can only vibrate plays
+// none of them.
+static inline bool DSBTriggerResists(uint8_t kind) {
+    return kind != DSB_TRIGGER_NONE && kind != DSB_TRIGGER_VIBRATE && kind != DSB_TRIGGER_RUMBLE;
+}
+
 // A trigger an effect waits for counts as pressed from 40 of 255 and as
 // released under 20, so the effect does not flicker at the edge.
 #define DSB_TRIGGER_PRESS 40

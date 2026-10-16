@@ -368,6 +368,56 @@ finally:
     log.close()
     sock.close()
 
+# The GameController backend, in a dry run: the handles play the motors, its
+# triggers only vibrate (a resisting choice is left to the game), each only
+# while that trigger is pressed, and waits read the pad's trigger values.
+p, port, status, log = broker("--backend", "gamecontroller", "--rumble-haptics", "--triggers",
+                              "R2:vibrate@8+L2,L2:rumble,L2:weapon+R2", seconds=10)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+addr = ("127.0.0.1", port)
+try:
+    time.sleep(1.2)
+    s = state(status)
+    assert s["backend"] == "gamecontroller" and s["rumbleHaptics"] is False, s
+    assert s["triggerWaits"] == ["L2", None], s
+    seq = drive(sock, addr, 0, 0.6, motors(0, 200), 2)
+    seq = neutral(sock, addr, seq, 0.6, 200, 60)
+    time.sleep(1.1)
+    s = state(status)
+    gc = s["gamecontroller"]
+    assert abs(gc["handles"][0] - 200 / 255) < .01 and abs(gc["handles"][1] - 60 / 255) < .01, gc
+    # L2 follows the heavy motor (step 7 of 8) only while L2 is pressed.
+    assert gc["triggers"][1] == 0, gc
+    seq = neutral(sock, addr, seq, 0.6, 200, 60)
+    seq = press(sock, addr, seq, 200, 0)
+    seq = neutral(sock, addr, seq, 0.3, 200, 60)
+    time.sleep(1.1)
+    s = state(status)
+    gc = s["gamecontroller"]
+    assert gc["triggers"][1] == 7 / 8 and gc["triggers"][0] == 0, gc
+    # R2 vibrates while L2 holds and R2 itself is pressed.
+    seq = press(sock, addr, seq, 200, 200)
+    seq = neutral(sock, addr, seq, 0.3, 200, 60)
+    time.sleep(1.1)
+    s = state(status)
+    assert s["gamecontroller"]["triggers"][0] == 1.0 and s["triggerWaitHeld"][0], s
+    seq = press(sock, addr, seq, 0, 200)
+    seq = neutral(sock, addr, seq, 0.3, 200, 60)
+    time.sleep(1.1)
+    s = state(status)
+    assert s["gamecontroller"]["triggers"][0] == 0 and not s["triggerWaitHeld"][0], s
+    p.wait(timeout=15)
+    text = (root / "rumble-haptics.log").read_text()
+    assert "Rumble haptics need" in text and "cannot resist on L2" in text, text
+    print("  ok    gamecontroller backend: handles play the motors, triggers vibrate while pressed, "
+          "resistance and coil haptics declined", flush=True)
+finally:
+    if p.poll() is None:
+        p.terminate()
+        p.wait(timeout=3)
+    log.close()
+    sock.close()
+
 # A probe names the backend that would run; an unknown backend is refused.
 r = subprocess.run([str(root / "broker"), "--dry-run", "--probe"], capture_output=True, text=True,
                    timeout=5)
@@ -403,4 +453,5 @@ r = subprocess.run([str(root / "broker"), "--dry-run", "--pcm", "--token", token
                     "--triggers", "R2:max"], capture_output=True, timeout=5)
 assert r.returncode == 64, r.returncode
 print("==> dualsense per-title feedback: rumble haptics, trigger effects per side, waits, "
-      "two effects per side, the neutral motor packet, precedence and refusal")
+      "two effects per side, the neutral motor packet, the gamecontroller backend, precedence "
+      "and refusal")

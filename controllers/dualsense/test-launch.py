@@ -34,6 +34,8 @@ if '--probe' in sys.argv:
     found = dict(bluetooth=0 if usb else 1, usb=usb, eligible=not usb)
     if os.environ.get('TEST_BACKEND'):
         found.update(backend=os.environ['TEST_BACKEND'], vendor='045e', product='0b13')
+    if '--backend' in sys.argv:
+        found.update(backend=sys.argv[sys.argv.index('--backend') + 1], vendor='045e', product='0b13')
     print(json.dumps(found), flush=True)
     sys.exit()
 Path(__file__).with_name('broker-args.json').write_text(json.dumps(sys.argv[1:]))
@@ -150,6 +152,27 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
         assert (observed["DSB_DEVICE"], observed["DSB_VENDOR"], observed["DSB_PRODUCT"]) == device, (
             backend, observed)
     print("  ok    dualsense launcher: the probe's backend runs, and Wine learns which pad", flush=True)
+
+    # NOTPROTON_PAD_BACKEND asks the probe for a backend it asks only by name. A
+    # pad that is not a DualSense gets neither the PCM transport nor the bridge
+    # inside Wine; a name that is not a plain word is ignored.
+    for named, device, bridged in [
+        ("gamecontroller", "gamecontroller", False),
+        ("Game Controller", "dualsense", True),
+    ]:
+        env = dict(clean, NOTPROTON_RAW_CONTROLLERS="1", NOTPROTON_PAD_BACKEND=named,
+                   NOTPROTON_PAD_RUMBLE="haptics")
+        recorded = root / "broker-args.json"
+        recorded.unlink(missing_ok=True)
+        result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=12)
+        assert result.returncode == 0, (named, result.stderr)
+        passed = json.loads(recorded.read_text())
+        observed = json.loads(result.stdout.splitlines()[-1])
+        assert passed[passed.index("--backend") + 1] == device, passed
+        assert ("--pcm" in passed) == bridged and ("--rumble-haptics" in passed) == bridged, passed
+        assert (observed["DSB_LIBRARY"] is not None) == bridged, observed
+        assert (observed["DSB_RAW"] is not None) == bridged and observed["DSB_DEVICE"] == device, observed
+    print("  ok    dualsense launcher: a backend asked by name, without the DualSense's bridge", flush=True)
 
     env = dict(clean, NOTPROTON_RAW_CONTROLLERS="1")
     result = subprocess.run(

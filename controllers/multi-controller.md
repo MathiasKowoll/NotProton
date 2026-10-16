@@ -57,7 +57,7 @@ report. The order after that is:
 | Trigger effects | `Controls.h` `DSBTriggerFeedback`, `DSBTriggerWeapon`, `DSBTriggerVibration`, `DSBTriggerPreset` | DualSense trigger modes `0x21`, `0x25`, `0x26`, `0x05`. | No. |
 | Trigger spec | `TriggerSpec.h` `DSBParseTriggers`, `DSBTriggerActive`, `DSBTriggerPressed` | `NOTPROTON_PAD_TRIGGERS` grammar, two choices per side, the press/release thresholds, rumble steps. | Yes. `R2` and `L2` can be read as "right" and "left trigger". |
 | Trigger waits | `broker.m` `updateTriggerWaits`, `Session.h` `DSBNoteTriggerPositions` | Switch a side's effect on the other trigger's position. | Yes. The DualSense backend reads the positions from Bluetooth report `0x31`, bytes 6 and 7 (`BrokerInternal.h` `DSBNotePadInput`). |
-| Core Haptics fallback | `DualSense.m` `prepare`, `setLevel`, `renewPlayers` | Without PCM, the motors drive `GCController.haptics` engines on the left and right handle localities. | Nearly. Only the `GCDualSenseGamepad` class check and `nativePad` are DualSense. |
+| Core Haptics channels | `HapticChannel.m` (`DSBHapticOpen`, `DSBHapticSet`, `DSBHapticRenew`) | One engine per locality playing a continuous event whose intensity follows a level. Used by the DualSense without PCM (the handles) and by the GameController backend (handles and triggers). | Yes, since step 4. |
 | HID presentation | `dualsense/bridge.m` | Inside Wine: presents the Bluetooth pad as a USB one (descriptor, report sizes, transport, the Edge as a standard pad); answers feature `08/02`; turns input `0x31` into `0x01`; sends output `0x02` to the broker. | No. Games speak Sony HID to a DualSense. |
 | Haptic audio endpoint | `dualsense/AudioFacade.m`, `mmdevapi/mmdevapi-container.c` | A 4-channel endpoint for haptic audio, and its ContainerId. | No. |
 | XInput pad | `xinput-motors.c` `init_pad`, `open_pad`, `pad_reader` | Builds an XInput pad from the pad's HID input reports. Forwards vibration only for vendor `054c`. | The presentation is neutral. Input decoding and the vendor gate are Sony. |
@@ -245,13 +245,31 @@ Every step keeps the DualSense working. Each runs `make dualsense-check` and
    it.
    - Tests: `test-launch.py` cases for the environment.
    - The DualSense is still the only backend.
-4. **GameController backend.** Core Haptics on the handles (and the triggers where
+4. **GameController backend.** *Built, not yet measured on a pad.* Core Haptics on the handles (and the triggers where
    offered), input from `GCController`.
    - It covers Xbox pads first.
    - Measure on hardware:
      - rumble felt, latency, and frame cost;
      - impulse triggers over Bluetooth;
      - that Wine's own write is gone.
+   What exists (`GameController.m`):
+   - **Opt-in.** A probe asks the backend only when it is named, so a session
+     without `NOTPROTON_PAD_BACKEND=gamecontroller` runs exactly as before. The
+     probe takes exactly one pad that GameController lists with haptics and that
+     is not Sony's. `IOHIDManager` supplies its vendor and product.
+   - **Motors.** They play on the two handle localities.
+   - **Triggers.** Where the pad offers trigger localities, `vibrate` and
+     `rumble` play on the triggers, each only while that trigger is pressed. The
+     core declines resisting choices with a log line, and rumble haptics too,
+     since there are no voice coils.
+   - **Waits.** They read `extendedGamepad` trigger values.
+   - **Inside Wine.** The launcher gives such a session neither the PCM transport
+     nor `bridge.dylib`. The XInput piece sends the pad's XInput vibration to the
+     broker alone (`DSB_DEVICE` other than `dualsense`), so Wine does not write
+     to its motors too.
+   - **Tests.** A dry run checks the handles, the triggers while pressed, the
+     declines and the waits (`test-rumble-haptics.py`). The launcher test checks
+     the opt-in and that the DualSense's bridge stays out.
 5. **Switch Pro HID backend.**
    - HD rumble from the two-band synth, sent as rumble updates.
    - Input report `0x30` (enabled by subcommand `0x03`) for waits and for the XInput

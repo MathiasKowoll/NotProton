@@ -15,18 +15,14 @@
 #include <zlib.h>
 #include <mach/mach.h>
 #include "BrokerInternal.h"
+#include "HapticChannel.h"
 #include "Calibration.h"
 #include "Controls.h"
 #include "PCM.h"
 
 // --pcm selects the bounded direct PCM transport; without it Core Haptics
 // plays the motors.
-static CHHapticEngine *engines[2];
-static atomic_bool engineRunning[2];
-static id<CHHapticPatternPlayer> players[2];
-static float lastLevel[2] = {-1, -1};
-static CHHapticPattern *silentPattern;
-static double playerStart;
+static DSBHapticChannel handles[2] = {{.level = -1}, {.level = -1}};
 static GCDualSenseGamepad *nativePad;
 static IOHIDManagerRef manager;
 static pthread_t worker;
@@ -185,115 +181,16 @@ static void *outputWorker(void *unused) {
 }
 
 static bool setLevel(int ch, float level) {
-    level = fmaxf(0, fminf(1, level));
-    if (fabsf(lastLevel[ch] - level) < .001) {
-        return true;
-    }
-    if (session.dry) {
-        lastLevel[ch] = level;
-        return true;
-    }
-    if (!atomic_load(&engineRunning[ch])) {
-        return level == 0;
-    }
-    NSError *error = nil;
-    CHHapticDynamicParameter *p = [[CHHapticDynamicParameter alloc]
-        initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl
-                      value:level
-               relativeTime:0];
-    @try {
-        if (![players[ch] sendParameters:@[ p ] atTime:CHHapticTimeImmediate error:&error]) {
-            fprintf(stderr, "Core Haptics update failed: %s\n", error.description.UTF8String);
-            return false;
-        }
-    } @catch (NSException *exception) {
-        atomic_store(&engineRunning[ch], false);
-        fprintf(stderr, "Core Haptics became unavailable: %s\n", exception.reason.UTF8String);
-        return false;
-    }
-    lastLevel[ch] = level;
-    return true;
+    return DSBHapticSet(&handles[ch], level);
 }
 
 static bool prepare(GCController *pad) {
-    NSArray *localities = @[ GCHapticsLocalityLeftHandle, GCHapticsLocalityRightHandle ];
-    for (int i = 0; i < 2; i++) {
-        engines[i] = [pad.haptics createEngineWithLocality:localities[i]];
-        if (!engines[i]) {
-            fprintf(stderr, "No haptic engine locality=%s supported=%s\n",
-                    [localities[i] UTF8String],
-                    pad.haptics.supportedLocalities.description.UTF8String);
-            return false;
-        }
-        engines[i].autoShutdownEnabled = NO;
-        engines[i].stoppedHandler = ^(CHHapticEngineStoppedReason reason) {
-          atomic_store(&engineRunning[i], false);
-          fprintf(stderr, "Core Haptics stopped: %ld\n", (long)reason);
-          session.quitting = 1;
-        };
-        engines[i].resetHandler = ^{
-          atomic_store(&engineRunning[i], false);
-          fprintf(stderr, "Core Haptics reset; session must restart\n");
-          session.quitting = 1;
-        };
-        NSError *e = nil;
-        if (![engines[i] startAndReturnError:&e]) {
-            fprintf(stderr, "Engine start ch=%d error=%s\n", i, e.description.UTF8String);
-            return false;
-        }
-        atomic_store(&engineRunning[i], true);
-        CHHapticEventParameter *one = [[CHHapticEventParameter alloc]
-            initWithParameterID:CHHapticEventParameterIDHapticIntensity
-                          value:1];
-        CHHapticEvent *event =
-            [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous
-                                          parameters:@[ one ]
-                                        relativeTime:0
-                                            duration:30];
-        CHHapticDynamicParameter *zero = [[CHHapticDynamicParameter alloc]
-            initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl
-                          value:0
-                   relativeTime:0];
-        CHHapticPattern *pattern = [[CHHapticPattern alloc] initWithEvents:@[ event ]
-                                                                parameters:@[ zero ]
-                                                                     error:&e];
-        silentPattern = pattern;
-        players[i] = [engines[i] createPlayerWithPattern:pattern error:&e];
-        if (!players[i]) {
-            fprintf(stderr, "Player create ch=%d error=%s\n", i, e.description.UTF8String);
-            return false;
-        }
-
-        if (![players[i] startAtTime:CHHapticTimeImmediate error:&e]) {
-            fprintf(stderr, "Player start ch=%d error=%s\n", i, e.description.UTF8String);
-            return false;
-        }
-        lastLevel[i] = 0;
-    }
-    playerStart = CFAbsoluteTimeGetCurrent();
-    return true;
+    return DSBHapticOpen(&handles[0], pad, GCHapticsLocalityLeftHandle) &&
+           DSBHapticOpen(&handles[1], pad, GCHapticsLocalityRightHandle);
 }
 
 static bool renewPlayers(void) {
-    if (session.dry || CFAbsoluteTimeGetCurrent() - playerStart < 25) {
-        return true;
-    }
-    for (int i = 0; i < 2; i++) {
-        NSError *e = nil;
-        id<CHHapticPatternPlayer> next = [engines[i] createPlayerWithPattern:silentPattern
-                                                                       error:&e];
-        if (!next) {
-            return false;
-        }
-        [players[i] stopAtTime:CHHapticTimeImmediate error:NULL];
-        players[i] = next;
-        if (![next startAtTime:CHHapticTimeImmediate error:&e]) {
-            return false;
-        }
-        lastLevel[i] = -1;
-    }
-    playerStart = CFAbsoluteTimeGetCurrent();
-    return true;
+    return DSBHapticRenew(&handles[0]) && DSBHapticRenew(&handles[1]);
 }
 
 static bool moved(uint8_t value, uint8_t sent) {
@@ -454,9 +351,11 @@ static int dualSenseOpen(void) {
     return result;
 }
 
-// The voice coils and the pad's input reports both come with the PCM transport.
+// Its triggers resist and vibrate either way; the voice coils and the pad's input
+// reports come with the PCM transport.
 static unsigned dualSenseAbilities(void) {
-    return dsb.pcmMode ? DSB_CAN_HAPTICS | DSB_CAN_AUDIO | DSB_CAN_READ_TRIGGERS : 0;
+    unsigned triggers = DSB_CAN_TRIGGER_FORCE | DSB_CAN_TRIGGER_RUMBLE;
+    return triggers | (dsb.pcmMode ? DSB_CAN_HAPTICS | DSB_CAN_AUDIO | DSB_CAN_READ_TRIGGERS : 0);
 }
 
 static bool dualSenseRealTime(void) {
@@ -732,20 +631,8 @@ static int dualSenseStop(NSString **state) {
     if (atomic_load(&dsb.workerExited)) {
         pthread_join(worker, NULL);
     }
-    for (int i = 0; i < 2; i++) {
-        // Disconnect can stop the engine before cleanup. PatternPlayer stop then
-        // raises an ObjC exception rather than returning NSError on macOS 27.
-        @try {
-            if (atomic_load(&engineRunning[i])) {
-                [players[i] stopAtTime:CHHapticTimeImmediate error:NULL];
-            }
-            [engines[i] stopWithCompletionHandler:nil];
-        } @catch (NSException *exception) {
-            fprintf(stderr, "Core Haptics already stopped during cleanup: %s\n",
-                    exception.reason.UTF8String);
-        }
-        atomic_store(&engineRunning[i], false);
-    }
+    DSBHapticClose(&handles[0]);
+    DSBHapticClose(&handles[1]);
     if (dsb.hid && !atomic_load(&dsb.stalled)) {
         if (dsb.pcmMode) {
             IOHIDDeviceUnscheduleFromRunLoop(dsb.hid, CFRunLoopGetMain(), kCFRunLoopCommonModes);

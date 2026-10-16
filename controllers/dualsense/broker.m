@@ -18,7 +18,7 @@
 DSBSession session;
 // The backends this broker can run; --backend names one, the DualSense is the
 // default, and a probe asks them in order.
-static const DSBBackend *const backends[] = {&DSBDualSenseBackend};
+static const DSBBackend *const backends[] = {&DSBDualSenseBackend, &DSBGameControllerBackend};
 static const DSBBackend *backend = &DSBDualSenseBackend;
 static bool backendChosen;
 static unsigned abilities;
@@ -362,6 +362,26 @@ static void applyTitleOptions(void) {
             triggerChoice.heldStrength[side] = 0;
         }
     }
+    // A choice the pad's triggers cannot play is left to the game.
+    for (int side = 0; side < 2; side++) {
+        uint8_t *kinds[2] = {&triggerChoice.kind[side], &triggerChoice.held[side]};
+        for (int which = 0; which < 2; which++) {
+            uint8_t kind = *kinds[which];
+            bool resists = DSBTriggerResists(kind);
+            if (kind == DSB_TRIGGER_NONE ||
+                (abilities & (resists ? DSB_CAN_TRIGGER_FORCE : DSB_CAN_TRIGGER_RUMBLE))) {
+                continue;
+            }
+            fprintf(stderr, "Triggers: %s cannot %s on %s; %s left to the game\n", backend->name,
+                    resists ? "resist" : "vibrate", sideNames[side],
+                    which ? "its effect while the other is pressed" : "its effect");
+            *kinds[which] = DSB_TRIGGER_NONE;
+        }
+        if (triggerChoice.when[side] && triggerChoice.held[side] == DSB_TRIGGER_NONE) {
+            triggerChoice.when[side] = 0;
+            triggerChoice.heldStrength[side] = 0;
+        }
+    }
     // Fixed effects go out now; a rumble side follows the motors. The game's own
     // trigger writes replace either as they arrive, and the session's cleanup
     // releases them like any trigger it set.
@@ -391,6 +411,9 @@ static int probe(void) {
     size_t count = backendChosen ? 1 : sizeof(backends) / sizeof(backends[0]);
     for (size_t b = 0; b < count; b++) {
         const DSBBackend *candidate = backendChosen ? backend : backends[b];
+        if (!backendChosen && candidate->onlyWhenNamed) {
+            continue;
+        }
         DSBProbe p = {0};
         int result = candidate->probe(&p);
         if (result) {

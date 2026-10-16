@@ -56,6 +56,8 @@ enum {
     DSB_CAN_HAPTICS = 1,       // play motor values on fine haptics (--rumble-haptics)
     DSB_CAN_AUDIO = 2,         // take haptic audio as a stream (DSB_PCM)
     DSB_CAN_READ_TRIGGERS = 4, // report the pad's trigger positions
+    DSB_CAN_TRIGGER_FORCE = 8, // resist the pull (resist, weapon, slope)
+    DSB_CAN_TRIGGER_RUMBLE = 16, // vibrate a trigger (vibrate, rumble)
 };
 
 // What a backend's probe found: its pads on each transport, and whether a
@@ -68,6 +70,9 @@ typedef struct {
 
 typedef struct {
     const char *name;
+    // A probe asks it only when it is named (--backend): it is still to be
+    // measured on a pad.
+    bool onlyWhenNamed;
     // A flag only this backend knows, at argv[*i]; it moves *i past a value.
     // False for a flag it does not know, or a value it refuses.
     bool (*argument)(int argc, char **argv, int *i);
@@ -106,3 +111,4 @@ typedef struct {
 
 // The backends a broker can run, in the order a probe asks them.
 extern const DSBBackend DSBDualSenseBackend;
+extern const DSBBackend DSBGameControllerBackend;

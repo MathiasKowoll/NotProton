@@ -21,7 +21,9 @@
  *
  * Only a pad whose XInputGetCapabilitiesEx names the bridged pad's vendor
  * (DSB_VENDOR, 054c for a DualSense) is forwarded, so another pad's vibration
- * never lands on the bridged one.
+ * never lands on the bridged one. A pad another backend drives (DSB_DEVICE
+ * other than dualsense) is one wine maps to XInput itself: its vibration goes
+ * to the broker alone, so the broker stays the only writer to it.
  *
  * With DSB_XINPUT_PAD=1 the bridged Sony pad is also presented as an XInput
  * pad, built from its own HID input reports. The launcher sets it for a title
@@ -137,6 +139,9 @@ static BOOL broker;          /* a session is configured and the socket is open *
 static BOOL steam_pad;
 /* DSB_VENDOR: the vendor of the pad the session bridges (054c for a DualSense). */
 static WORD bridged_vendor = 0x054c;
+/* DSB_DEVICE other than dualsense: wine maps the pad to XInput itself and would
+ * write its motors too, so its vibration goes to the broker alone. */
+static BOOL broker_only;
 static SOCKET sock = INVALID_SOCKET;
 static struct sockaddr_in dest;
 static uint8_t token[16];
@@ -236,8 +241,10 @@ static BOOL CALLBACK init_broker(INIT_ONCE *o, void *param, void **ctx)
     /* Distinct from the bridge's own source, which is the Unix pid. */
     source = 0x80000000u | GetCurrentProcessId();
     {
-        char flag[8], vendor[8];
+        char flag[8], vendor[8], device[32];
         steam_pad = GetEnvironmentVariableA("DSB_STEAM_PAD", flag, sizeof(flag)) && !strcmp(flag, "1");
+        broker_only = GetEnvironmentVariableA("DSB_DEVICE", device, sizeof(device)) &&
+                      strcmp(device, "dualsense");
         if (GetEnvironmentVariableA("DSB_VENDOR", vendor, sizeof(vendor)) == 4)
         {
             int v = 0;
@@ -550,6 +557,11 @@ DWORD WINAPI XInputSetState(DWORD index, XVIB *vib)
                       vib->wRightMotorSpeed >> 8);
         }
         if (broker && vib) motors_to_broker(vib);
+        return ERROR_SUCCESS;
+    }
+    if (broker && vib && broker_only && !steam_pad && is_bridged(index))
+    {
+        motors_to_broker(vib);
         return ERROR_SUCCESS;
     }
     r = p_ ? p_(index, vib) : ERROR_DEVICE_NOT_CONNECTED;

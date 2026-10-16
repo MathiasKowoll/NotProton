@@ -112,11 +112,20 @@ func main() throws -> Int32 {
 
     var brokerEnvironment = environment
     brokerEnvironment.removeValue(forKey: "DYLD_INSERT_LIBRARIES")
+    // NOTPROTON_PAD_BACKEND names a backend the probe asks only when named
+    // (gamecontroller, still to be measured on a pad); without it the probe
+    // asks the DualSense, as before.
+    let namedBackend = environment["NOTPROTON_PAD_BACKEND"].flatMap {
+        !$0.isEmpty && $0.utf8.allSatisfy({ (97...122).contains($0) }) ? $0 : nil
+    }
+    if let named = environment["NOTPROTON_PAD_BACKEND"], namedBackend == nil {
+        fputs("DualSense launch: NOTPROTON_PAD_BACKEND=\(named) not understood; ignored\n", stderr)
+    }
     func probe() throws -> (eligible: Bool, usb: Int, product: String, backend: String, vendor: String) {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = root.appendingPathComponent("broker")
-        process.arguments = ["--probe"]
+        process.arguments = ["--probe"] + (namedBackend.map { ["--backend", $0] } ?? [])
         process.environment = brokerEnvironment
         process.standardOutput = pipe
         try process.run()
@@ -167,7 +176,8 @@ func main() throws -> Int32 {
     var random = [UInt8](repeating: 0, count: 16)
     arc4random_buf(&random, random.count)
     let token = random.map { String(format: "%02x", $0) }.joined()
-    let pcm = environment["DSB_PCM"] != "0"
+    // The PCM transport and the bridge inside Wine are the DualSense's.
+    let pcm = state.backend == "dualsense" && environment["DSB_PCM"] != "0"
     environment["DSB_PCM"] = pcm ? "1" : "0"
     var broker: Process?
     var brokerPipe: Pipe?
@@ -286,8 +296,10 @@ func main() throws -> Int32 {
     }
     environment["DSB_PORT"] = String(port)
     environment["DSB_TOKEN"] = token
-    environment["DSB_RAW"] = pcm ? "1:pcm" : "1"
-    environment["DSB_LIBRARY"] = root.appendingPathComponent("bridge.dylib").path
+    if state.backend == "dualsense" {
+        environment["DSB_RAW"] = pcm ? "1:pcm" : "1"
+        environment["DSB_LIBRARY"] = root.appendingPathComponent("bridge.dylib").path
+    }
     func saveSession() throws {
         try writeJSON(
             [
