@@ -172,6 +172,14 @@ void DSBPCMReceive(const DSBPacket *p) {
 // dry transport can never produce on its own.
 static unsigned pcmTestStaleWrite;
 
+// A Bluetooth link drains about 65 output reports a second (bluetoothd's own
+// 15 ms policy). Control reports wait 16 ms between them; while haptic audio
+// streams at 3000/64 = 46.9 reports a second, they share what is left.
+#define DSB_LINK_REPORTS_PER_SECOND 65.
+static double controlGap(bool streaming) {
+    return streaming ? 1. / (DSB_LINK_REPORTS_PER_SECOND - 3000. / 64.) : .016;
+}
+
 static bool pcmWrite(uint8_t *b, unsigned n) {
     static unsigned testWrites;
     if (atomic_load(&dsb.stalled)) {
@@ -331,7 +339,8 @@ void *DSBPCMWorker(void *unused) {
                 }
                 // Motor values are sent with the mode switch when a stream closes, so
                 // they wait until then rather than go out in an audio-mode report.
-                if (!hasAudio && !streaming && dsb.legacyDirty) {
+                // They take their turn with the other control reports.
+                if (!hasAudio && !streaming && dsb.legacyDirty && now >= nextControl) {
                     control = true;
                     dsb.legacyDirty = false;
                 }
@@ -340,7 +349,7 @@ void *DSBPCMWorker(void *unused) {
                     if (!pcmControl(payload, hasAudio || streaming)) {
                         break;
                     }
-                    nextControl = monotonicNow() + .016;
+                    nextControl = monotonicNow() + controlGap(hasAudio || streaming);
                     pthread_mutex_lock(&dsb.outputLock);
                     if (controlChange) {
                         memcpy(dsb.lastSent, snapshot, 47);
