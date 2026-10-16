@@ -26,6 +26,14 @@ int main(int argc, char **argv) {
                                                     : NP_CX_OPTIONS_STATEMENT);
         return 0;
     }
+    // What the runner options placeholder expands to for the JSON given.
+    if (argc == 3 && strcmp(argv[1], "runner-options") == 0) {
+        np_out_t o = {0};
+        if (!out_json_string(&o, argv[2])) return 1;
+        fwrite(o.buf, 1, o.len, stdout);
+        free(o.buf);
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "migration") == 0) {
         fputs(NP_LAUNCH_MIGRATION, stdout);
         return 0;
@@ -39,6 +47,6 @@ int main(int argc, char **argv) {
         return 0;
     }
     fputs("usage: emit component|statement [fallback [fex-tool...]]|migration|compat-hint|"
-          "image-files-label\n", stderr);
+          "image-files-label|runner-options <json>\n", stderr);
     return 2;
 }

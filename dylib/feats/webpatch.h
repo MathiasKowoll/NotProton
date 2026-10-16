@@ -17,6 +17,10 @@ void np_webpatch_set_fallback_tool(const char *name);
 // fallback would drop are skipped, as is anything past NP_WEBPATCH_FEX_TOOLS_MAX.
 void np_webpatch_set_fex_tools(const char *const *names, size_t count);
 
+// Sets the runner options the options panel offers, as JSON keyed by tool name, for
+// this thread. The string must outlive the transform. NULL means none.
+void np_webpatch_set_runner_options(const char *json);
+
 // The compat UIs, named so a caller can compare against the table rather than a literal
 // of its own that a rename would leave behind. forcetool calls SpecifyCompatTool straight
 // out; selecttool reads its list from the CompatManager routes.

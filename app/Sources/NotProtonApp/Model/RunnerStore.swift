@@ -157,15 +157,28 @@ enum CompatToolList {
     ) throws -> Bool {
         let (builds, listed, tools) = resolved(runners: runners, file: file, fexAvailable: fexAvailable)
         let text = contents(tools)
-        let changed = !(listed == text || (listed == nil && text.isEmpty))
+        var changed = !(listed == text || (listed == nil && text.isEmpty))
         if changed {
             try FileManager.default.createDirectory(
                 at: file.deletingLastPathComponent(), withIntermediateDirectories: true
             )
             try atomicReplace(file, with: Data(text.utf8), step: String(localized: "Update compatibility tools"))
         }
+        changed = try syncOptions(tools, runners: runners, file: SupportPaths.runnerOptions(beside: file)) || changed
         prune(keeping: Set(builds.map(\.id)), runners: runners, bridge: bridge, compatTools: compatTools)
         return changed
+    }
+
+    // The options page reads this beside the tool list, once per Steam launch like the list.
+    private static func syncOptions(_ tools: [InstalledTool], runners: URL, file: URL) throws -> Bool {
+        let wanted = RunnerOptions.pageFile(for: tools, runners: runners)
+        guard wanted != (try? Data(contentsOf: file)) else { return false }
+        if let wanted {
+            try atomicReplace(file, with: wanted, step: "Update compatibility tools")
+        } else {
+            try FileManager.default.removeItem(at: file)
+        }
+        return true
     }
 
     private static func prune(

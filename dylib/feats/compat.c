@@ -415,6 +415,37 @@ static int tools_dir_path(char *out, size_t size) {
     return 0;
 }
 
+#define RUNNER_OPTIONS_MAX (64 * 1024)
+
+static void load_tool_list_once(void);
+
+// What each tool's runner declares for the options panel, as the app wrote it
+// beside the tool list. Read with the list, so a change needs a Steam restart too.
+static char *g_runner_options;
+
+static void load_runner_options(const char *home) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/Library/Application Support/notproton/runner-options.json", home);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char *buf = malloc(RUNNER_OPTIONS_MAX + 1);
+    size_t n = buf ? fread(buf, 1, RUNNER_OPTIONS_MAX + 1, f) : 0;
+    fclose(f);
+    if (n == 0 || n > RUNNER_OPTIONS_MAX || memchr(buf, '\0', n)) {
+        NP_WARN("load_runner_options: %s is empty, too large or not text, so no runner "
+                "options are offered", path);
+        free(buf);
+        return;
+    }
+    buf[n] = '\0';
+    g_runner_options = buf;
+}
+
+const char *np_compat_runner_options_json(void) {
+    load_tool_list_once();
+    return g_runner_options;
+}
+
 static void load_tool_list(void) {
     const char *home = np_home_dir();
     char tools_dir[512];
@@ -423,6 +454,7 @@ static void load_tool_list(void) {
     char path[512];
     snprintf(path, sizeof(path), "%s/Library/Application Support/notproton/tools", home);
     np_compat_load_tool_list(path, tools_dir);
+    load_runner_options(home);
 }
 
 static void load_tool_list_once(void) {

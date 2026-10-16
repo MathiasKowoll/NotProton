@@ -9,7 +9,8 @@ body=$(sed -n '/^import_prefix_settings() {$/,/^}$/p' "$SRC")
 wrapper=$(sed -n '/^without_lock_fds() {$/,/^}$/p' "$SRC")
 [ -n "$wrapper" ] || { echo "FAIL: without_lock_fds not found in $SRC"; exit 1; }
 helpers=""
-for helper in controller_ids ids_without hidraw_lines write_owned_controllers plan_hidden_controllers; do
+for helper in controller_ids ids_without hidraw_lines write_owned_controllers plan_hidden_controllers \
+	runner_option_field plan_runner_options; do
 	part=$(sed -n "/^$helper() {\$/,/^}\$/p" "$SRC")
 	[ -n "$part" ] || { echo "FAIL: $helper not found in $SRC"; exit 1; }
 	helpers="$helpers
@@ -212,6 +213,58 @@ IGNORE='0x054c/0x0ce6' EXCEPT='' RAW=''
 again "" 0
 same_file "a linked tracking file writes no controller keys" "$work/retina-off" "$case_dir/imported"
 is "a linked tracking file is logged" "=== could not track the hidden controllers, leaving them as they are ===" "$(cat "$case_dir/log")"
+
+echo "== runner options"
+cat > "$work/options.json" <<'EOF'
+{"options":[
+ {"label":"Vibration","name":"PAD_VIBRATION","choices":[
+  {"label":"Modern","value":"","reg":["[HKEY_LOCAL_MACHINE\\X]","\"Mode\"=dword:00000000"]},
+  {"label":"Legacy","value":"legacy","reg":["[HKEY_LOCAL_MACHINE\\X]","\"Mode\"=dword:00000001"]}]},
+ {"label":"Passed","name":"PAD_ENV","env":true,"choices":[{"label":"Off","value":""},{"label":"On","value":"1"}]},
+ {"label":"Reserved","name":"DYLD_INSERT_LIBRARIES","env":true,"choices":[{"label":"x","value":"x"}]}
+]}
+EOF
+mode() { printf '%s\r\n' '[HKEY_LOCAL_MACHINE\X]' "\"Mode\"=dword:0000000$1" ''; }
+with_options() {
+	: > "$case_dir/calls"; : > "$case_dir/log"; rm -f "$case_dir/imported"
+	env WINEPREFIX="$case_dir/pfx" WINELOADER="$work/wine" WINESERVER="$work/wineserver" \
+		STEAM_COMPAT_DATA_PATH="$case_dir" NOTPROTON_RAW_CONTROLLERS=1 verb=waitforexitandrun \
+		FAKE_CALLS="$case_dir/calls" FAKE_IMPORTED="$case_dir/imported" log="$case_dir/log" body="$body" \
+		runner_options_file="$1" PAD_VIBRATION="${2-}" PAD_ENV="${3-}" DYLD_INSERT_LIBRARIES="${4-}" \
+		sh -ec 'eval "$body"; runner_option_reg=""; runner_option_env=""
+			plan_runner_options; import_prefix_settings; echo "env:$runner_option_env"' \
+		> "$case_dir/out" 2>&1 || true
+}
+
+new_case
+with_options "$work/options.json"
+{ cat "$work/retina-off"; mode 0; } > "$work/expected"
+same_file "an unset option imports its empty choice" "$work/expected" "$case_dir/imported"
+is "the first options restart the prefix so the driver reads them" "reg import C:\\notproton-settings.X
+wineserver -k
+wineserver -w" "$(calls)"
+is "the choice is logged" "runner option: PAD_VIBRATION=(unset)
+runner option: PAD_ENV=(unset)" "$(head -2 "$case_dir/log")"
+with_options "$work/options.json"
+is "the same options do not restart the prefix" "reg import C:\\notproton-settings.X" "$(calls)"
+
+with_options "$work/options.json" legacy 1 /tmp/x.dylib
+{ cat "$work/retina-off"; mode 1; } > "$work/expected"
+same_file "a set option imports its choice" "$work/expected" "$case_dir/imported"
+is "a changed choice restarts the prefix" "wineserver -w" "$(calls | tail -1)"
+is "only a set env option reaches Wine, never a variable the script owns" "env: PAD_ENV" "$(tail -1 "$case_dir/out")"
+
+with_options "$work/options.json" unknown
+same_file "a value no choice names imports nothing for that option" "$work/retina-off" "$case_dir/imported"
+
+new_case
+with_options "$work/none.json" legacy
+same_file "a runner without options imports what it always did" "$work/retina-off" "$case_dir/imported"
+is "and does not restart the prefix" "reg import C:\\notproton-settings.X" "$(calls)"
+printf '{oops' > "$work/broken.json"
+with_options "$work/broken.json" legacy
+same_file "a broken file is ignored" "$work/retina-off" "$case_dir/imported"
+is "a broken file does not end the launch" "env:" "$(tail -1 "$case_dir/out")"
 
 if [ "$fails" -eq 0 ]; then
 	echo "==> settingscheck: all assertions hold"

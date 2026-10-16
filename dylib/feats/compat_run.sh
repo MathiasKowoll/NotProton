@@ -612,7 +612,8 @@ import_prefix_settings() {
       '[HKEY_LOCAL_MACHINE\Software\Classes\steam]' '"URL Protocol"=""' '' \
       '[HKEY_LOCAL_MACHINE\Software\Classes\steam\shell\open\command]' \
       '@="\"C:\\Program Files (x86)\\Steam\\steam.exe\" \"%1\""' '' \
-      && hidraw_lines add "$controllers_add" && hidraw_lines remove "$controllers_remove"; } \
+      && hidraw_lines add "$controllers_add" && hidraw_lines remove "$controllers_remove" \
+      && printf '%s' "$runner_option_reg"; } \
       > "$settings_file" 2>/dev/null; then
     [ -z "$settings_file" ] || rm -f "$settings_file"
     echo "=== could not write the prefix settings, launching without them ===" >> "$log" 2>&1 || true
@@ -623,6 +624,15 @@ import_prefix_settings() {
   without_lock_fds "$WINELOADER" reg import "C:\\${settings_file##*/}" >> "$log" 2>&1 \
     && import_status=0 || import_status=$?
   rm -f "$settings_file"
+  options_record="$STEAM_COMPAT_DATA_PATH/notproton-runner-options"
+  options_sum=$(printf '%s' "$runner_option_reg" | cksum)
+  if [ "$import_status" -eq 0 ] && { [ -n "$runner_option_reg" ] || [ -e "$options_record" ]; } \
+    && [ "$options_sum" != "$(cat "$options_record" 2>/dev/null)" ]; then
+    printf '%s\n' "$options_sum" > "$options_record" 2>/dev/null || true
+    # Like the controller keys below, a runner's options may only be read when Wine starts.
+    without_lock_fds "$WINESERVER" -k >> "$log" 2>&1 || true
+    without_lock_fds "$WINESERVER" -w >> "$log" 2>&1 || true
+  fi
   if [ "$import_status" -eq 0 ] && [ "$controllers_planned" -eq 1 ]; then
     write_owned_controllers "$controllers_wanted" 2>/dev/null || true
     if [ -n "$controllers_add$controllers_remove" ]; then
@@ -641,6 +651,58 @@ import_prefix_settings() {
     || echo "=== prefix settings import exited status=$import_status ===" >> "$log" 2>&1 || true
 }
 
+# A runner can carry notproton-options.json with options of its own. Each option is
+# a variable set in the game's launch options, like the ones above; the choice whose
+# value it holds adds its registry lines to the prefix settings, and an "env" option
+# also reaches Wine as is. An unset variable picks the choice whose value is empty.
+runner_options_file="$CX_ROOT/notproton-options.json"
+runner_option_reg=""
+runner_option_env=""
+runner_option_field() {
+  plutil -extract "$1" raw -o - "$runner_options_file" 2>/dev/null
+}
+plan_runner_options() {
+  [ -r "$runner_options_file" ] || return 0
+  crlf=$(printf '\r\n_'); crlf=${crlf%_}
+  cr=$(printf '\r_'); cr=${cr%_}
+  options=$(runner_option_field options) || return 0
+  case "$options" in ''|*[!0-9]*) return 0 ;; esac
+  i=0
+  while [ "$i" -lt "$options" ]; do
+    at="options.$i"
+    i=$((i + 1))
+    name=$(runner_option_field "$at.name") || continue
+    case "$name" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) continue ;; esac
+    # The script sets these itself
+    case "$name" in PATH|HOME|DYLD_*|WINEPREFIX|WINESERVER|WINELOADER|CX_ROOT|CX_HOME|STEAM_*) continue ;; esac
+    eval "value=\${$name-}"
+    if [ -n "$value" ] && [ "$(runner_option_field "$at.env")" = true ]; then
+      runner_option_env="$runner_option_env $name"
+    fi
+    choices=$(runner_option_field "$at.choices") || continue
+    case "$choices" in ''|*[!0-9]*) continue ;; esac
+    j=0
+    while [ "$j" -lt "$choices" ]; do
+      choice="$at.choices.$j"
+      j=$((j + 1))
+      [ "$(runner_option_field "$choice.value")" = "$value" ] || continue
+      lines=$(runner_option_field "$choice.reg") || lines=0
+      case "$lines" in ''|*[!0-9]*) lines=0 ;; esac
+      k=0
+      while [ "$k" -lt "$lines" ]; do
+        line=$(runner_option_field "$choice.reg.$k") || line=""
+        k=$((k + 1))
+        case "$line" in *"$cr"*|*"
+"*) continue ;; esac
+        runner_option_reg="$runner_option_reg$line$crlf"
+      done
+      [ "$lines" -eq 0 ] || runner_option_reg="$runner_option_reg$crlf"
+      echo "runner option: $name=${value:-(unset)}" >> "$log" 2>&1 || true
+      break
+    done
+  done
+}
+
 stage_step="runner check"
 if [ -z "$np_build" ] || [ ! -d "$CX_ROOT/lib/wine" ]; then
   echo "=== build ${np_build:-(none recorded)} behind this compatibility tool is not set up, set it up in NotProton ===" >> "$log" 2>&1 || true
@@ -648,6 +710,7 @@ if [ -z "$np_build" ] || [ ! -d "$CX_ROOT/lib/wine" ]; then
   exit 1
 fi
 echo "runner: build $np_build ($np_display) at $CX_ROOT" >> "$log" 2>&1 || true
+plan_runner_options
 
 # Each CrossOver build needs its own template.
 # FEX builds need two, one for FEX/arm64 Wine and one for Rosetta/AMD64 Wine
@@ -1535,7 +1598,8 @@ else
   echo "=== client staged no overlay renderer, overlay disabled ===" >> "$log" 2>&1 || true
 fi
 set -- --args "$shim_exe" "$@"
-for name in $(env | LC_ALL=C sed -nE 's/^(CX_APPLEGPTK_LIBD3DSHARED_PATH|Steam[A-Za-z0-9]*|(CX_GRAPHICS|D3DM_|DXMT_|DXVK_|MTL_|ROSETTA_)[A-Z0-9_]*)=.*/\1/p'); do
+for name in $(env | LC_ALL=C sed -nE 's/^(CX_APPLEGPTK_LIBD3DSHARED_PATH|Steam[A-Za-z0-9]*|(CX_GRAPHICS|D3DM_|DXMT_|DXVK_|MTL_|ROSETTA_)[A-Z0-9_]*)=.*/\1/p') \
+    $runner_option_env; do
   eval "value=\$$name"
   # shellcheck disable=SC2154 # eval assigns value on the line above
   set -- --env "$name=$value" "$@"

@@ -55,6 +55,10 @@ void np_compat_export_tools_path(void);
 // number of tools kept.
 int  np_compat_load_tool_list(const char *path, const char *tools_dir);
 
+// The runner options the app wrote for the options panel, as JSON keyed by tool name.
+// NULL when there are none. Loaded with the tool list.
+const char *np_compat_runner_options_json(void);
+
 // Writes a directory for every tool in the app's list and removes the directories of tools
 // no longer in it.
 int  np_compat_ensure_tool_manifest(void);

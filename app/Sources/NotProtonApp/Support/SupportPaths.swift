@@ -47,6 +47,11 @@ enum SupportPaths {
     // Read by the dylib at Steam launch, in np_compat_load_tool_list.
     static var toolList: URL { support.appending(path: "tools") }
 
+    // Read by the dylib with the tool list, for the options page.
+    static func runnerOptions(beside toolList: URL) -> URL {
+        toolList.deletingLastPathComponent().appending(path: "runner-options.json")
+    }
+
     static func runnerRoot(forBuild build: String, runners: URL = SupportPaths.runners) -> URL {
         runners.appending(path: "crossover-\(build)")
     }

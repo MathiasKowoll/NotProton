@@ -30,6 +30,12 @@
 static _Thread_local char g_fallback_tool[NP_TOOL_NAME_MAX];
 static _Thread_local char g_fex_tools[NP_WEBPATCH_FEX_TOOLS_MAX * (NP_TOOL_NAME_MAX + 3) + 3] = "[]";
 
+// Stands for the runner options set by np_webpatch_set_runner_options, pasted in as
+// JSON.parse("...") so whatever the file holds reaches the page as data.
+#define NP_RUNNER_OPTIONS "\027"
+
+static _Thread_local const char *g_runner_options = "{}";
+
 typedef struct {
     const char *find;
     const char *replace;
@@ -89,6 +95,10 @@ static const char *marker_text(char c) {
     return NULL;
 }
 
+void np_webpatch_set_runner_options(const char *json) {
+    g_runner_options = json ? json : "{}";
+}
+
 static size_t match_at(const char *src, size_t len, size_t pos,
                        const char *find, np_cap_t *caps) {
     for (int i = 0; i < NP_CAP_MAX; i++) { caps[i].at = NULL; caps[i].len = 0; }
@@ -103,6 +113,15 @@ static size_t match_at(const char *src, size_t len, size_t pos,
             size_t n = strlen(text);
             if (s + n > len || memcmp(src + s, text, n) != 0) return 0;
             s += n;
+            continue;
+        }
+        // Whatever options were pasted, so a patched chunk is still recognised as one.
+        if (*f == NP_RUNNER_OPTIONS[0]) {
+            if (s + 12 > len || memcmp(src + s, "JSON.parse(\"", 12) != 0) return 0;
+            s += 12;
+            while (s < len && src[s] != '"') s += src[s] == '\\' ? 2 : 1;
+            if (s + 2 > len || src[s + 1] != ')') return 0;
+            s += 2;
             continue;
         }
         int ci = cap_index((unsigned char)*f);
@@ -159,11 +178,28 @@ static int out_put(np_out_t *o, const char *p, size_t n) {
     return 1;
 }
 
+static int out_json_string(np_out_t *o, const char *json) {
+    if (!out_put(o, "JSON.parse(\"", 12)) return 0;
+    for (const unsigned char *c = (const unsigned char *)json; *c; c++) {
+        char esc[8];
+        size_t n;
+        if (*c == '"' || *c == '\\') { esc[0] = '\\'; esc[1] = (char)*c; n = 2; }
+        else if (*c < 0x20) n = (size_t)snprintf(esc, sizeof(esc), "\\u%04x", *c);
+        else { esc[0] = (char)*c; n = 1; }
+        if (!out_put(o, esc, n)) return 0;
+    }
+    return out_put(o, "\")", 2);
+}
+
 static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
     for (const char *r = replace; *r; r++) {
         const char *text = marker_text(*r);
         if (text) {
             if (!out_put(o, text, strlen(text))) return 0;
+            continue;
+        }
+        if (*r == NP_RUNNER_OPTIONS[0]) {
+            if (!out_json_string(o, g_runner_options)) return 0;
             continue;
         }
         int ci = cap_index((unsigned char)*r);
@@ -205,6 +241,13 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
     "if(!G)return{p:0,e:[]};" \
     "const n=G.findIndex(w=>m(w)||!/^[A-Za-z_]\\w*=/.test(o.slice(w.start,w.end)));" \
     "return{p:G[0].start,e:G.slice(0,n<0?G.length:n)}})(),"
+
+// Options the game's runner declares, one dropdown each, after NotProton's own.
+#define NP_RUNNER_OPTIONS_ROWS(RT, BARREL) \
+    "...(npR&&Array.isArray(npR.options)?npR.options.map((npO,npN)=>(0," RT ".jsx)(" BARREL ".XY," \
+    "{label:(npR.section?npR.section+\": \":\"\")+npO.label,children:(0," RT ".jsx)(" BARREL ".m," \
+    "{rgOptions:npO.choices.map(npC=>({data:npC.value,label:npC.label})),selectedOption:g(npO.name)," \
+    "onChange:npV=>s([[npO.name,npV.data]])})},\"ro\"+npN)):[])"
 
 // Rewrites KEY=value entries before %command% and leaves the rest of the text byte for byte.
 #define NP_CX_LAUNCH \
@@ -275,6 +318,7 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
     "fx=v=>fe.filter(e=>!fk(e)).concat(v?[F+v]:[]).join(\";\")," \
     "fv=(fe.filter(fk).pop()||\"=2\").replace(/^[^=]*=/,\"\").replace(/\"/g,\"\").trim().split(/\\s/)[0]," \
     "fn=Math.max(isNaN(+fv)?2:+fv,1)," \
+    "npR=(()=>{try{return " NP_RUNNER_OPTIONS "[t.strCompatToolName]}catch(npE){}})()," \
     "U=[{data:\"\",label:npL(\"Off\",\"关闭\")}," \
     "{data:\"1.5\",label:\"1.5x\"}," \
     "{data:\"1.72\",label:\"1.72x\"}," \
@@ -312,7 +356,8 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
     "(0," RT ".jsx)(" BARREL ".XY,{label:npL(\"Controllers (May break Steam Input. Not recommended)\"," \
     "\"控制器（可能导致 Steam Input 失效，不推荐）\"),children:" \
     "T([\"NOTPROTON_RAW_CONTROLLERS\"],npL(\"Let games read controllers directly\"," \
-    "\"允许游戏直接读取控制器\"),\"1\",\"\")},\"ctl\")" \
+    "\"允许游戏直接读取控制器\"),\"1\",\"\")},\"ctl\")," \
+    NP_RUNNER_OPTIONS_ROWS(RT, BARREL) \
     "]})})}"
 
 #define NP_CX_OPTIONS_CAPTURE(RT, BARREL) \
