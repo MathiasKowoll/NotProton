@@ -43,6 +43,9 @@ if os.environ.get('TEST_BAD_READY'):
     print('{}', flush=True)
 else:
     print(json.dumps(dict(ready=True, port=54565, pid=os.getpid())), flush=True)
+if os.environ.get('TEST_EXIT_AFTER_READY'):
+    time.sleep(0.2)
+    sys.exit(int(os.environ['TEST_EXIT_AFTER_READY']))
 if os.environ.get('TEST_REMOVE_ONCE'):
     marker = Path(__file__).with_name('removed-once')
     if not marker.exists():
@@ -63,7 +66,8 @@ import signal
 import sys
 import time
 
-keys = ('DSB_RAW', 'DSB_PCM', 'DSB_LIBRARY', 'DSB_SESSION', 'DSB_DEVICE', 'DSB_VENDOR', 'DSB_PRODUCT')
+keys = ('DSB_RAW', 'DSB_PCM', 'DSB_LIBRARY', 'DSB_SESSION', 'DSB_DEVICE', 'DSB_VENDOR', 'DSB_PRODUCT',
+        'DSB_ROUTE')
 observed = {k: os.environ.get(k) for k in keys}
 observed['TERM'] = signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
 print(json.dumps(observed), flush=True)
@@ -86,6 +90,7 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
         observed = json.loads(result.stdout.splitlines()[-1])
         assert observed["DSB_SESSION"] == "1"
         assert observed["TERM"], (route, "the game's process starts with SIGTERM ignored")
+        assert observed["DSB_ROUTE"] == ("bridge" if route == "pcm" else route), observed
         if route == "pcm":
             assert observed["DSB_RAW"] == "1:pcm" and observed["DSB_PCM"] == "1", observed
             assert observed["DSB_LIBRARY"] == str(root / "bridge.dylib")
@@ -193,6 +198,8 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
     assert json.loads((root / "sessions/999999-status.json").read_text())["route"] == "broker-failed"
     observed = json.loads(result.stdout.splitlines()[-1])
     assert observed["DSB_LIBRARY"] is None
+    # What the probe found belongs to a bridged session; the unbridged game gets none of it.
+    assert observed["DSB_ROUTE"] == "broker-failed" and observed["DSB_DEVICE"] is None, observed
     # The run script it becomes must be able to trap TERM, or Exit Game in Steam
     # stops nothing.
     assert observed["TERM"], "SIGTERM still ignored after the broker-failed bypass"
@@ -225,6 +232,17 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
         if resumed.poll() is None:
             resumed.terminate()
             resumed.communicate(timeout=8)
+
+    # A broker that ends for good mid-session leaves a status saying so.
+    result = subprocess.run(
+        args, env=dict(env, TEST_EXIT_AFTER_READY="4", TEST_CHILD_SLEEP="1.5"),
+        capture_output=True, text=True, timeout=12,
+    )
+    assert result.returncode == 0, result.stderr
+    status = json.loads((root / "sessions/999999-status.json").read_text())
+    assert status["state"] == "disabled" and status["route"] == "transport-stopped", status
+    assert status["exitStatus"] == 4, status
+    print("  ok    a transport that stops for good says so in the status", flush=True)
 
     owner = subprocess.Popen(
         args, env=dict(env, TEST_CHILD_SLEEP="30"), stdout=subprocess.PIPE, stderr=subprocess.PIPE

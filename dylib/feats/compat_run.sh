@@ -1473,6 +1473,9 @@ read_app_meta
 # so the bridge's xinput1_4 also presents the pad as an XInput pad. A title
 # that speaks Sony keeps the raw device alone. NOTPROTON_PAD_XINPUT=1/0 forces.
 dsb_xinput_pad=0
+if [ -n "${DSB_ROUTE:-}" ]; then
+  echo "controllers: bridge route $DSB_ROUTE" >> "$log" 2>&1 || true
+fi
 # NOTPROTON_PAD_STEAM_INPUT=1 (with direct access and Steam Input on): for a title
 # that reads the pad only through Steam Input (Wo Long, Dynasty Warriors: Origins).
 # Steam keeps the input; the vibration the title sends to Steam's virtual pad

@@ -91,8 +91,12 @@ func main() throws -> Int32 {
     let root = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
         .deletingLastPathComponent()
     var environment = ProcessInfo.processInfo.environment
-    // Never inherit credentials from another session. User options are retained.
-    for key in ["DSB_PORT", "DSB_TOKEN", "DSB_RAW", "DSB_LIBRARY"] {
+    // Never inherit credentials or what an earlier session found. User options
+    // (DSB_PCM, DSB_DISABLED) are retained.
+    for key in [
+        "DSB_PORT", "DSB_TOKEN", "DSB_RAW", "DSB_LIBRARY", "DSB_DEVICE", "DSB_VENDOR", "DSB_PRODUCT",
+        "DSB_ROUTE",
+    ] {
         environment.removeValue(forKey: key)
     }
     environment["DSB_SESSION"] = "1"
@@ -105,11 +109,16 @@ func main() throws -> Int32 {
         ? candidate : "unknown"
     let info = sessions.appendingPathComponent(app + ".json")
     let stats = sessions.appendingPathComponent(app + "-status.json")
+    // DSB_ROUTE tells the run script which way the session went, for its log:
+    // a bridge that is off for a reason must not be off in silence.
     func bypass(_ reason: String) throws -> Never {
         try writeJSON(
             ["state": "bypass", "route": reason, "updated": Date().timeIntervalSince1970], to: stats
         )
-        return try execute(command, environment: environment)
+        var unbridged = environment
+        for key in ["DSB_DEVICE", "DSB_VENDOR", "DSB_PRODUCT"] { unbridged.removeValue(forKey: key) }
+        unbridged["DSB_ROUTE"] = reason
+        return try execute(command, environment: unbridged)
     }
     if environment["DSB_DISABLED"] == "1" { try bypass("disabled") }
     if environment["NOTPROTON_RAW_CONTROLLERS"] != "1" { try bypass("steam-input") }
@@ -303,6 +312,7 @@ func main() throws -> Int32 {
     }
     environment["DSB_PORT"] = String(port)
     environment["DSB_TOKEN"] = token
+    environment["DSB_ROUTE"] = "bridge"
     if state.backend == "dualsense" {
         environment["DSB_RAW"] = pcm ? "1:pcm" : "1"
         environment["DSB_LIBRARY"] = root.appendingPathComponent("bridge.dylib").path
@@ -359,6 +369,11 @@ func main() throws -> Int32 {
             if broker?.isRunning != true {
                 disabled = true
                 fputs("DualSense transport stopped; reconnect and relaunch the game.\n", stderr)
+                try? writeJSON(
+                    [
+                        "state": "disabled", "route": "transport-stopped",
+                        "exitStatus": service.terminationStatus, "updated": Date().timeIntervalSince1970,
+                    ], to: stats)
             }
         }
         tick(0.05)
