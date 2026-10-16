@@ -37,7 +37,9 @@ struct RunnerOptions: Codable, Equatable, Sendable {
     static func isUsableName(_ name: String) -> Bool {
         guard name.wholeMatch(of: #/[A-Za-z_][A-Za-z0-9_]*/#) != nil else { return false }
         let reserved = ["PATH", "HOME", "WINEPREFIX", "WINESERVER", "WINELOADER", "CX_ROOT", "CX_HOME"]
+        // DSB_ is the controller bridge's own: the launcher sets it per session.
         return !reserved.contains(name) && !name.hasPrefix("DYLD_") && !name.hasPrefix("STEAM_")
+            && !name.hasPrefix("DSB_")
     }
 
     // The page's copy, by tool name, for the tools whose runner declares options.

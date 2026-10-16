@@ -259,10 +259,10 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
 
 // Options the game's runner declares, one dropdown each, after NotProton's own.
 #define NP_RUNNER_OPTIONS_ROWS(RT, BARREL) \
-    "...(npR&&Array.isArray(npR.options)?npR.options.map((npO,npN)=>(0," RT ".jsx)(" BARREL ".XY," \
+    "...npRO.map((npO,npN)=>(0," RT ".jsx)(" BARREL ".XY," \
     "{label:(npR.section?npR.section+\": \":\"\")+npO.label,children:(0," RT ".jsx)(" BARREL ".m," \
     "{rgOptions:npO.choices.map(npC=>({data:npC.value,label:npC.label})),selectedOption:g(npO.name)," \
-    "onChange:npV=>s([[npO.name,npV.data]])})},\"ro\"+npN)):[])"
+    "onChange:npV=>s([[npO.name,npV.data]])})},\"ro\"+npN))"
 
 // Rewrites KEY=value entries before %command% and leaves the rest of the text byte for byte.
 #define NP_CX_LAUNCH \
@@ -429,7 +429,8 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
 // and Rosetta options the run script forwards. A file read at run time cannot
 // name anything else (dylib/embed_options.py holds the same rule).
 #define NP_SUGGESTED_NAME_JS \
-    "/^(?:(?:NOTPROTON|DSB|CX_GRAPHICS|D3DM|DXMT|DXVK|MTL|ROSETTA)_[A-Z0-9_]+|WINE[EM]SYNC)$/"
+    "/^(?!.*_(?:PATH|FILE|DIR|LIBRARY)$)" \
+    "(?:(?:NOTPROTON|CX_GRAPHICS|D3DM|DXMT|DXVK|MTL|ROSETTA)_[A-Z0-9_]+|DSB_(?:DISABLED|PCM)|WINE[EM]SYNC)$/"
 
 // The launch options measured to work for this game (suggested-options.json, or
 // the file of that name in Application Support, read at Steam start, for the games
@@ -464,12 +465,19 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
     "fv=(fe.filter(fk).pop()||\"=2\").replace(/^[^=]*=/,\"\").replace(/\"/g,\"\").trim().split(/\\s/)[0]," \
     "fn=Math.max(isNaN(+fv)?2:+fv,1)," \
     "npR=(()=>{try{return " NP_RUNNER_OPTIONS "[t.strCompatToolName]}catch(npE){}})()," \
+    /* The runner's options as the app checks them (RunnerOptions.isUsableName); others are left out. */ \
+    "npRO=npR&&Array.isArray(npR.options)?npR.options.filter(npO=>!!npO&&typeof npO===\"object\"&&" \
+    "typeof npO.name===\"string\"&&/^[A-Za-z_][A-Za-z0-9_]*$/.test(npO.name)&&" \
+    "!/^(?:PATH|HOME|WINEPREFIX|WINESERVER|WINELOADER|CX_ROOT|CX_HOME)$/.test(npO.name)&&" \
+    "!/^(?:DYLD|STEAM|DSB)_/.test(npO.name)&&typeof npO.label===\"string\"&&Array.isArray(npO.choices)&&" \
+    "npO.choices.length>0&&npO.choices.every(npC=>!!npC&&typeof npC.value===\"string\"&&" \
+    "typeof npC.label===\"string\")):[]," \
     NP_CX_CONTROLLER_DECLS(RT, BARREL) \
     "npSV=e=>!!e&&typeof e===\"object\"&&typeof e.summary===\"string\"&&!!e.summary.trim()&&" \
     "(e.summary_zh===undefined||typeof e.summary_zh===\"string\")&&!!e.options&&" \
     "typeof e.options===\"object\"&&!Array.isArray(e.options)&&Object.keys(e.options).length>0&&" \
     "Object.keys(e.options).every(k=>" NP_SUGGESTED_NAME_JS ".test(k)&&typeof e.options[k]===\"string\"&&" \
-    "/^[\\w.,:=\\/+@%-]+$/.test(e.options[k]))," \
+    "/^[\\w.,:=\\/+@-]+$/.test(e.options[k]))," \
     "npSG=(()=>{let f;try{f=" NP_SUGGESTED_FILE "}catch(npE){}" \
     "const e=f&&typeof f===\"object\"&&Object.prototype.hasOwnProperty.call(f,t.unAppID)?f[t.unAppID]:null;" \
     "return npSV(e)?e:(" NP_SUGGESTED_OPTIONS ")[t.unAppID]})(),npSK=npSG?Object.keys(npSG.options):[]," \

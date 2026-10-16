@@ -72,6 +72,10 @@ for (const form of Object.keys(FORMS)) {
   for (const [what, text] of [
     ['a variable outside the list', JSON.stringify({ [someId]: entry({ DYLD_INSERT_LIBRARIES: '/tmp/x' }) })],
     ['WINEDLLOVERRIDES', JSON.stringify({ [someId]: entry({ WINEDLLOVERRIDES: 'dinput8=n' }) })],
+    ['the launcher\'s DSB_SESSION', JSON.stringify({ [someId]: entry({ DSB_SESSION: '1' }) })],
+    ['the launcher\'s DSB_LIBRARY', JSON.stringify({ [someId]: entry({ DSB_LIBRARY: '/tmp/x.dylib' }) })],
+    ['a name holding a path', JSON.stringify({ [someId]: entry({ NOTPROTON_SOME_PATH: '/tmp' }) })],
+    ['a value with %', JSON.stringify({ [someId]: entry({ DSB_DISABLED: '%command%' }) })],
     ['a value needing quotes', JSON.stringify({ [someId]: entry({ DSB_DISABLED: '1; rm' }) })],
     ['an empty value', JSON.stringify({ [someId]: entry({ DSB_DISABLED: '' }) })],
     ['a number', JSON.stringify({ [someId]: entry({ DSB_DISABLED: 1 }) })],

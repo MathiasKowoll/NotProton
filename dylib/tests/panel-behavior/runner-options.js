@@ -16,6 +16,19 @@ const OPTIONS = {
     ],
   },
   'notproton-other': { options: [{ label: 'Elsewhere', name: 'OTHER', choices: [{ label: 'x', value: '' }] }] },
+  // What the app's own check would have kept out, should the file say it anyway.
+  'notproton-bad': {
+    section: 'Pad',
+    options: [
+      null,
+      { label: 'Inject', name: '$(touch /tmp/np-pwn)', choices: [{ label: 'x', value: '1' }] },
+      { label: 'Bridge', name: 'DSB_SESSION', choices: [{ label: 'x', value: '1' }] },
+      { label: 'Loader', name: 'DYLD_INSERT_LIBRARIES', choices: [{ label: 'x', value: '/tmp/x' }] },
+      { label: 'No choices', name: 'NO_CHOICES' },
+      { label: 'Odd choice', name: 'ODD_CHOICE', choices: [null] },
+      { label: 'Kept', name: 'KEPT', choices: [{ label: 'x', value: '' }] },
+    ],
+  },
 };
 
 let failed = 0;
@@ -41,6 +54,10 @@ for (const form of Object.keys(FORMS)) {
 
   t.ok(rows(nodes('', { strCompatToolName: 'notproton-none' })).length === 0,
        'a tool whose runner declares nothing gets no rows');
+  let bad;
+  try { bad = rows(nodes('', { strCompatToolName: 'notproton-bad' })); } catch (e) { bad = e; }
+  t.ok(Array.isArray(bad) && bad.map(x => x.props.label).join('|') === 'Pad: Kept',
+       'an option the app would refuse is left out, and the page still renders');
 
   const bare = panel(emit, form).render;
   t.ok(walk(bare({ details: details(' %command%') })).every(x => !/^Pad: /.test(x.props.label || '')),

@@ -10,11 +10,17 @@ from pathlib import Path
 FIELDS = {"title", "summary", "summary_zh", "options", "measured"}
 REQUIRED = {"title", "summary", "options", "measured"}
 # The variables a suggestion may set; the panel holds the same rule for the file
-# read at run time (NP_SUGGESTED_NAME_JS in webpatch.c).
-NAME = re.compile(r"(?:(?:NOTPROTON|DSB|CX_GRAPHICS|D3DM|DXMT|DXVK|MTL|ROSETTA)_[A-Z0-9_]+|WINE[EM]SYNC)\Z")
+# read at run time (NP_SUGGESTED_NAME_JS in webpatch.c). Of the bridge's own,
+# only the two a user sets: the rest (DSB_SESSION, DSB_LIBRARY, DSB_PORT, ...)
+# are the launcher's and would skip it or inject a library. No name that holds
+# a path.
+NAME = re.compile(
+    r"(?!.*_(?:PATH|FILE|DIR|LIBRARY)\Z)"
+    r"(?:(?:NOTPROTON|CX_GRAPHICS|D3DM|DXMT|DXVK|MTL|ROSETTA)_[A-Z0-9_]+|DSB_(?:DISABLED|PCM)|WINE[EM]SYNC)\Z")
 # Values the panel writes without quoting (NP_CX_LAUNCH's qv), so the launch
-# options read back exactly as suggested.
-VALUE = re.compile(r"[\w.,:=/+@%-]+\Z", re.ASCII)
+# options read back exactly as suggested. No %, which could write a second
+# %command%.
+VALUE = re.compile(r"[\w.,:=/+@-]+\Z", re.ASCII)
 # NOTPROTON_PAD_TRIGGERS as the launcher and the broker accept it
 # (controllers/dualsense/Controls.h, DSBParseTriggers).
 CHOICE = re.compile(r"(?:off|(?:light|medium|strong|resist|weapon|slope|vibrate|rumble)(?:@[1-8])?)\Z")
