@@ -162,7 +162,13 @@ struct SteamInstallerTests {
         for name in InstallPayload.runtimeFiles {
             let installed = fixture.support.appending(path: name)
             #expect(try Data(contentsOf: installed) == Data("runtime fixture".utf8))
-            if !name.hasSuffix(".dylib") {
+            // Libraries are loaded, not run: a .dylib, and the Windows pieces the
+            // run script copies into a prefix.
+            if name.hasSuffix(".dylib") || name.hasSuffix(".dll") {
+                if name.hasSuffix(".dll") {
+                    #expect(!files.isExecutableFile(atPath: installed.path(percentEncoded: false)))
+                }
+            } else {
                 #expect(files.isExecutableFile(atPath: installed.path(percentEncoded: false)))
             }
         }

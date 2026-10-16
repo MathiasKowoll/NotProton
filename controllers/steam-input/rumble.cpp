@@ -187,6 +187,22 @@ static void *worker(void *) {
                 if (handle && (request.generation != seen[i] || active[i] != handle)) {
                     steam.controller->TriggerVibration(handle, request.left, request.right);
                     active[i] = handle;
+                    // Each new pair of motor values handed to Steam, once (the
+                    // high byte of each), so a missing or swapped side shows.
+                    {
+                        static uint16_t pairs[40];
+                        static int count;
+                        uint16_t pair = uint16_t((request.left >> 8) << 8 | (request.right >> 8));
+                        bool known = false;
+                        for (int k = 0; k < count; ++k) {
+                            known |= pairs[k] == pair;
+                        }
+                        if (!known && count < 40) {
+                            pairs[count++] = pair;
+                            fprintf(stderr, "notproton-rumble: to Steam slot %d left=%u right=%u\n", i,
+                                    request.left >> 8, request.right >> 8);
+                        }
+                    }
                     static bool logged;
                     if (!logged) {
                         fprintf(stderr, "notproton-rumble: forwarding rumble via Steam\n");

@@ -9,6 +9,9 @@ enum InstallPayload {
         "prepare-game-loader", "game-host.dylib",
         "controllers/steam-input/rumble.dylib",
         "controllers/dualsense/launch", "controllers/dualsense/broker", "controllers/dualsense/bridge.dylib",
+        // Windows pieces the run script stages into a bridged game's prefix.
+        "controllers/dualsense/mmdevapi.dll", "controllers/dualsense/xinput1_4.dll",
+        "controllers/dualsense/xinput1_3.dll",
     ]
 
     struct Located: Sendable {

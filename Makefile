@@ -522,7 +522,9 @@ game-activation-check: $(OUT_DIR)/game-activation-check
 
 DUALSENSE_SRC := controllers/dualsense
 DUALSENSE_OUT := $(OUT_DIR)/controllers/dualsense
-DUALSENSE_RUNTIME := $(DUALSENSE_OUT)/bridge.dylib $(DUALSENSE_OUT)/broker $(DUALSENSE_OUT)/launch
+# Windows pieces the launch script stages into a bridged game's prefix.
+DUALSENSE_PE := $(DUALSENSE_OUT)/mmdevapi.dll $(DUALSENSE_OUT)/xinput1_4.dll $(DUALSENSE_OUT)/xinput1_3.dll
+DUALSENSE_RUNTIME := $(DUALSENSE_OUT)/bridge.dylib $(DUALSENSE_OUT)/broker $(DUALSENSE_OUT)/launch $(DUALSENSE_PE)
 DUALSENSE_HEADERS := $(wildcard $(DUALSENSE_SRC)/*.h)
 
 $(DUALSENSE_OUT)/bridge.dylib: $(DUALSENSE_SRC)/bridge.m $(DUALSENSE_SRC)/AudioFacade.m $(DUALSENSE_HEADERS)
@@ -534,6 +536,12 @@ $(DUALSENSE_OUT)/broker: $(DUALSENSE_SRC)/broker.m $(DUALSENSE_SRC)/PCMTransport
 	@mkdir -p $(DUALSENSE_OUT)
 	$(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -O2 -Wall -fobjc-arc $(filter %.m,$^) -framework AudioToolbox -framework AppKit -framework GameController -framework CoreHaptics -framework IOKit -lz -o $@
 	codesign -f -s - --identifier com.notproton.dualsense.broker $@
+
+$(DUALSENSE_OUT)/mmdevapi.dll: $(DUALSENSE_SRC)/mmdevapi/mmdevapi-container.c $(DUALSENSE_SRC)/mmdevapi/mmdevapi.def $(DUALSENSE_SRC)/mmdevapi/build.sh
+	$(DUALSENSE_SRC)/mmdevapi/build.sh $(DUALSENSE_OUT)
+
+$(DUALSENSE_OUT)/xinput1_4.dll $(DUALSENSE_OUT)/xinput1_3.dll: $(DUALSENSE_SRC)/xinput/xinput-motors.c $(DUALSENSE_SRC)/xinput/xinput1_4.def $(DUALSENSE_SRC)/xinput/xinput1_3.def $(DUALSENSE_SRC)/xinput/build.sh
+	$(DUALSENSE_SRC)/xinput/build.sh $(DUALSENSE_OUT)
 
 $(DUALSENSE_OUT)/launch: $(DUALSENSE_SRC)/launch.swift
 	@mkdir -p $(DUALSENSE_OUT)
@@ -591,6 +599,9 @@ helpers-install: $(ICONMAKER) $(APPINFO) $(GAME_HOST) $(GAME_METADATA) $(DUALSEN
 	$(call install_atomically,$(DUALSENSE_OUT)/launch,$(SUPPORT_DIR)/controllers/dualsense/launch)
 	$(call install_atomically,$(DUALSENSE_OUT)/broker,$(SUPPORT_DIR)/controllers/dualsense/broker)
 	$(call install_atomically,$(DUALSENSE_OUT)/bridge.dylib,$(SUPPORT_DIR)/controllers/dualsense/bridge.dylib)
+	$(call install_atomically,$(DUALSENSE_OUT)/mmdevapi.dll,$(SUPPORT_DIR)/controllers/dualsense/mmdevapi.dll)
+	$(call install_atomically,$(DUALSENSE_OUT)/xinput1_4.dll,$(SUPPORT_DIR)/controllers/dualsense/xinput1_4.dll)
+	$(call install_atomically,$(DUALSENSE_OUT)/xinput1_3.dll,$(SUPPORT_DIR)/controllers/dualsense/xinput1_3.dll)
 	$(call install_atomically,$(GAME_HOST),$(SUPPORT_DIR)/game-host.dylib)
 	$(call install_atomically,$(GAME_METADATA),$(SUPPORT_DIR)/prepare-game-loader)
 	$(call install_atomically,$(ICONMAKER),$(SUPPORT_DIR)/iconmaker)

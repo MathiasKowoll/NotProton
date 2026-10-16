@@ -4,6 +4,8 @@
 #import <CoreAudio/CoreAudio.h>
 #import <AudioUnit/AudioUnit.h>
 #include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
 #include <stdatomic.h>
 #include <unistd.h>
 #include <mach/mach_time.h>
@@ -19,6 +21,9 @@
 // Element zero is the master volume; elements 1..4 address individual channels.
 static _Atomic(float) deviceVolume[5] = {1, 1, 1, 1, 1};
 static atomic_bool deviceMuted;
+// The I/O buffer size a client asked for. The render thread runs in its own 10 ms
+// blocks whatever this is; it is kept only so the device reports what was set.
+static atomic_uint deviceBufferFrames = 480;
 static bool audioEnabled(void) {
     return DSBBridgeEnabled() && DSBRawControllerEnabled();
 }
@@ -47,9 +52,13 @@ static OSStatus virtualProperty(AudioObjectID id, const AudioObjectPropertyAddre
     case kAudioObjectPropertyManufacturer:
         s = CFSTR("Local DualSense Steam Bridge");
         break;
-    case kAudioDevicePropertyModelUID:
-        s = CFSTR("054c:0ce6:wireless");
+    case kAudioDevicePropertyModelUID: {
+        // The pad the launcher found, so an Edge is not announced as a standard pad.
+        const char *product = getenv("DSB_PRODUCT");
+        s = product && !strcmp(product, "0df2") ? CFSTR("054c:0df2:wireless")
+                                                : CFSTR("054c:0ce6:wireless");
         break;
+    }
     case kAudioDevicePropertyStreamConfiguration: {
         AudioBufferList list = {.mNumberBuffers =
                                     a->mScope == kAudioDevicePropertyScopeInput ? 0 : 1,
@@ -90,7 +99,7 @@ static OSStatus virtualProperty(AudioObjectID id, const AudioObjectPropertyAddre
         memcpy(bytes, &u, 4);
         break;
     case kAudioDevicePropertyBufferFrameSize:
-        u = 480;
+        u = atomic_load(&deviceBufferFrames);
         memcpy(bytes, &u, 4);
         break;
     case kAudioDevicePropertyBufferFrameSizeRange: {
@@ -188,6 +197,22 @@ static OSStatus objectSet(AudioObjectID id, const AudioObjectPropertyAddress *a,
                 return kAudioHardwareIllegalOperationError;
             }
             atomic_store(&deviceVolume[a->mElement], volume);
+            return noErr;
+        }
+        // Newer Wine (CrossOver Preview 27) sets the device's buffer size before
+        // it opens a stream and fails the stream when that is refused; measured
+        // with Beast of Reincarnation: every IAudioClient::Initialize on this
+        // endpoint returned E_FAIL after "Failed to set device buffer frame size".
+        if (id == VDEVICE && a->mSelector == kAudioDevicePropertyBufferFrameSize) {
+            if (n != sizeof(UInt32) || !in) {
+                return kAudioHardwareBadPropertySizeError;
+            }
+            UInt32 frames;
+            memcpy(&frames, in, sizeof(frames));
+            if (frames < 16 || frames > 8192) {
+                return kAudioHardwareIllegalOperationError;
+            }
+            atomic_store(&deviceBufferFrames, frames);
             return noErr;
         }
         if (id == VDEVICE && a->mSelector == kAudioDevicePropertyMute) {
@@ -297,11 +322,17 @@ static OSStatus unitSet(AudioUnit unit, AudioUnitPropertyID p, AudioUnitScope sc
                 return kAudioUnitErr_InvalidPropertyValue;
             }
             AudioStreamBasicDescription f = *(AudioStreamBasicDescription *)data;
-            if (f.mFormatID != kAudioFormatLinearPCM || f.mChannelsPerFrame != 4 ||
+            // 4 channels is the haptic layout (3/4 drive the actuators). 2 is
+            // accepted so a client that opens the pad's endpoint in stereo
+            // (Silent Hill: Townfall through FMOD) runs instead of failing
+            // silently; its signal is measured, not sent to the pad.
+            if (f.mFormatID != kAudioFormatLinearPCM ||
+                (f.mChannelsPerFrame != 4 && f.mChannelsPerFrame != 2) ||
                 !isfinite(f.mSampleRate) || f.mSampleRate < 8000 || f.mSampleRate > 192000 ||
                 (f.mFormatFlags &
                  (kAudioFormatFlagIsNonInterleaved | kAudioFormatFlagIsBigEndian)) ||
-                f.mBytesPerFrame != 4 * (f.mBitsPerChannel / 8) || f.mFramesPerPacket != 1 ||
+                f.mBytesPerFrame != f.mChannelsPerFrame * (f.mBitsPerChannel / 8) ||
+                f.mFramesPerPacket != 1 ||
                 f.mBytesPerPacket != f.mBytesPerFrame ||
                 ((f.mFormatFlags & kAudioFormatFlagIsFloat) && f.mBitsPerChannel != 32) ||
                 !(f.mBitsPerChannel == 8 || f.mBitsPerChannel == 16 || f.mBitsPerChannel == 32)) {
@@ -401,12 +432,16 @@ static void *render(void *ctx) {
     static atomic_uint nextStream;
     uint32_t stream = atomic_fetch_add(&nextStream, 1) + 1;
     uint8_t pcm[64] = {0, (uint8_t)stream, (uint8_t)(stream >> 8), (uint8_t)(stream >> 16)};
+    float stereoPeak[2] = {0, 0};
+    unsigned stereoActive = 0, stereoBuffers = 0;
     unsigned count = 0;
     double next = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1e9;
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     while (atomic_load(&u->running)) {
         clearAudioBuffer(buf, size, &u->fmt);
-        AudioBufferList list = {.mNumberBuffers = 1, .mBuffers = {{4, (UInt32)size, buf}}};
+        unsigned channels = u->fmt.mChannelsPerFrame;
+        AudioBufferList list = {.mNumberBuffers = 1,
+                                .mBuffers = {{channels, (UInt32)size, buf}}};
         AudioUnitRenderActionFlags flags = 0;
         AudioTimeStamp ts = {.mSampleTime = frameTime,
                              .mHostTime = mach_absolute_time(),
@@ -418,10 +453,45 @@ static void *render(void *ctx) {
                 : 0;
         const uint8_t *samples = list.mBuffers[0].mData;
         if (result || (flags & kAudioUnitRenderAction_OutputIsSilence) ||
-            list.mNumberBuffers != 1 || list.mBuffers[0].mNumberChannels != 4 || !samples ||
+            list.mNumberBuffers != 1 || list.mBuffers[0].mNumberChannels != channels || !samples ||
             list.mBuffers[0].mDataByteSize < size) {
             clearAudioBuffer(buf, size, &u->fmt);
             samples = buf;
+        }
+        if (channels == 2) {
+            // Measurement only: when the stream carries signal, and how much.
+            unsigned stride = u->fmt.mBytesPerFrame, bytes = u->fmt.mBitsPerChannel / 8;
+            float pl = 0, pr = 0;
+            for (unsigned i = 0; i < frames; i++) {
+                pl = fmaxf(pl, fabsf(sample(samples + i * stride, &u->fmt)));
+                pr = fmaxf(pr, fabsf(sample(samples + i * stride + bytes, &u->fmt)));
+            }
+            stereoPeak[0] = fmaxf(stereoPeak[0], pl);
+            stereoPeak[1] = fmaxf(stereoPeak[1], pr);
+            stereoActive += (pl > .001f || pr > .001f);
+            if (++stereoBuffers >= 100) {
+                if (stereoActive) {
+                    fprintf(stderr,
+                            "DSB: stereo stream to the pad: peak L=%.3f R=%.3f, signal in %u of %u buffers\n",
+                            stereoPeak[0], stereoPeak[1], stereoActive, stereoBuffers);
+                }
+                stereoPeak[0] = stereoPeak[1] = 0;
+                stereoActive = stereoBuffers = 0;
+            }
+            frameTime += frames;
+            next += frames / u->fmt.mSampleRate;
+            double now2 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1e9;
+            if (now2 - next > .04) {
+                next = now2;
+            }
+            while (atomic_load(&u->running) &&
+                   (now2 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1e9) < next) {
+                double remain = next - now2;
+                if (remain > .0005) {
+                    usleep((remain - .0003) * 1e6);
+                }
+            }
+            continue;
         }
         float l = 0, r = 0;
         float master = atomic_load(&deviceMuted) ? 0 : atomic_load(&deviceVolume[0]);
@@ -445,9 +515,9 @@ static void *render(void *ctx) {
                 }
             }
         }
-        if (!DSBDirectPCMEnabled()) {
-            DSBSendPacket(DSB_LEVEL, fminf(1, l), fminf(1, r), NULL, 0);
-        }
+        // In PCM mode the envelope is the fallback for a link too slow for PCM:
+        // the broker turns it into motor values only while PCM is suspended.
+        DSBSendPacket(DSB_LEVEL, fminf(1, l), fminf(1, r), NULL, 0);
         frameTime += frames;
         next += frames / u->fmt.mSampleRate;
         double now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1e9;
@@ -466,9 +536,8 @@ static void *render(void *ctx) {
         pcm[0] = 0;
         memset(pcm + 4, 0, 60);
         DSBSendPacket(DSB_PCM, 0, 0, pcm, 64);
-    } else {
-        DSBSendPacket(DSB_LEVEL, 0, 0, NULL, 0);
     }
+    DSBSendPacket(DSB_LEVEL, 0, 0, NULL, 0);
     free(buf);
     return NULL;
 }
@@ -484,8 +553,8 @@ static OSStatus unitStart(AudioUnit unit) {
             return kAudioUnitErr_FailedInitialization;
         }
         u->started = true;
-        fprintf(stderr, "DSB: virtual haptic stream started, 4 channels %.0f Hz\n",
-                u->fmt.mSampleRate);
+        fprintf(stderr, "DSB: virtual haptic stream started, %u channels %.0f Hz\n",
+                (unsigned)u->fmt.mChannelsPerFrame, u->fmt.mSampleRate);
     }
     return 0;
 }

@@ -17,6 +17,7 @@ typedef struct {
     bool outputDirty, haveLast, legacyDirty;
     NSMutableArray *sentHistory;
     atomic_bool quitting, workerRunning, workerExited, stalled, deviceRemoved;
+    uint16_t product; // USB product id of the paired pad: 0ce6, or 0df2 for the Edge
     atomic_uint reports, errors;
     atomic_ullong writeStartedNS;
     atomic_uchar legacyLeft, legacyRight;
@@ -33,6 +34,8 @@ bool DSBPCMStartInput(void);
 bool DSBPCMWorkerIsReady(void);
 void *DSBPCMWorker(void *unused);
 void DSBPCMNotify(void);
+// The link is too slow for PCM (input under 100 Hz) or PCM is waiting to resume.
+bool DSBPCMSuspended(void);
 void DSBPCMReceive(const DSBPacket *packet);
 // Takes its own lock. Callers must not hold outputLock.
 NSDictionary *DSBPCMSnapshot(void);

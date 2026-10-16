@@ -42,7 +42,14 @@ if "--hardware" not in sys.argv:
                 chunks.append(wire.unpack(sock.recv(1024)))
             except socket.timeout:
                 break
-        assert len(chunks) > 5 and all(p[1] == 3 and p[2] == token for p in chunks)
+        assert all(p[1] in (1, 3) and p[2] == token for p in chunks)
+        # The envelope rides beside PCM as the fallback for a slow link: the
+        # haptic channels' -.125/.5 scaled by the device volume, then zero at stop.
+        levels = [p for p in chunks if p[1] == 1]
+        chunks = [p for p in chunks if p[1] == 3]
+        assert levels and levels[-1][6] == 0 and levels[-1][7] == 0
+        assert any(0 < p[6] < p[7] and abs(p[7] - 4 * p[6]) < .02 for p in levels)
+        assert len(chunks) > 5
         assert chunks[-1][-1][0] == 0
         # Speaker channels are .75 but haptic channels are -.125/.5. Verify
         # the signed samples at steady state.

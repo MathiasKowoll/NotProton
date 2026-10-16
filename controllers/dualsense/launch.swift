@@ -112,7 +112,7 @@ func main() throws -> Int32 {
 
     var brokerEnvironment = environment
     brokerEnvironment.removeValue(forKey: "DYLD_INSERT_LIBRARIES")
-    func probe() throws -> (eligible: Bool, usb: Int) {
+    func probe() throws -> (eligible: Bool, usb: Int, product: String) {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = root.appendingPathComponent("broker")
@@ -125,9 +125,10 @@ func main() throws -> Int32 {
         guard let eligible = state["eligible"] as? Bool, let usb = state["usb"] as? Int,
             state["bluetooth"] is Int
         else { throw LaunchError("Incomplete controller probe") }
-        return (eligible, usb)
+        // An older broker says nothing about the model: that was a standard pad.
+        return (eligible, usb, state["product"] as? String ?? "0ce6")
     }
-    var state: (eligible: Bool, usb: Int)?
+    var state: (eligible: Bool, usb: Int, product: String)?
     var probeError: Error?
     for attempt in 0..<3 {
         do {
@@ -137,8 +138,12 @@ func main() throws -> Int32 {
         if let state, state.eligible || state.usb > 0 { break }
         if attempt < 2 { tick(0.75) }
     }
-    if let probeError { throw probeError }
-    guard let state else { throw LaunchError("Cannot verify controller transport") }
+    if probeError != nil || state == nil {
+        // The bridge is an extra, not a gate: without a verified pad the game
+        // starts as it would without NotProton's controller route.
+        try bypass("probe-failed")
+    }
+    guard let state else { try bypass("probe-failed") }
     if !state.eligible {
         try bypass(state.usb > 0 ? "original-usb" : "no-single-bluetooth-dualsense")
     }
@@ -146,11 +151,11 @@ func main() throws -> Int32 {
     let lock = open(
         sessions.appendingPathComponent("controller.lock").path,
         O_CREAT | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600)
-    guard lock >= 0 else { throw LaunchError("Cannot lock controller session") }
+    guard lock >= 0 else { try bypass("lock-unavailable") }
     defer { close(lock) }
-    guard flock(lock, LOCK_EX | LOCK_NB) == 0 else {
-        throw LaunchError("Another direct-controller game owns the wireless bridge")
-    }
+    // A second game in direct mode starts without the bridge rather than not at
+    // all: the pad belongs to the session that took it first.
+    guard flock(lock, LOCK_EX | LOCK_NB) == 0 else { try bypass("bridge-busy") }
     let logURL = sessions.appendingPathComponent(app + ".log")
     let logFD = open(logURL.path, O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0o600)
     guard logFD >= 0 else { throw LaunchError("Cannot open controller log") }
@@ -204,7 +209,19 @@ func main() throws -> Int32 {
         }
         return assigned
     }
-    let port = try startBroker()
+    // The model the game sees. An Edge stays an Edge unless the title's Sony
+    // library knows only the standard pad (NOTPROTON_PAD_AS=dualsense).
+    let presentAsStandard = environment["NOTPROTON_PAD_AS"] == "dualsense" && state.product == "0df2"
+    environment["DSB_PRODUCT"] = presentAsStandard ? "0ce6" : state.product
+    if presentAsStandard {
+        fputs("DualSense launch: Edge presented as a standard DualSense (NOTPROTON_PAD_AS=dualsense)\n", stderr)
+    }
+    let port: Int
+    do { port = try startBroker() } catch {
+        stop(broker)
+        fputs("DualSense launch: \(error); starting without the bridge\n", stderr)
+        try bypass("broker-failed")
+    }
     environment["DSB_PORT"] = String(port)
     environment["DSB_TOKEN"] = token
     environment["DSB_RAW"] = pcm ? "1:pcm" : "1"
@@ -216,7 +233,8 @@ func main() throws -> Int32 {
                 "started": Date().timeIntervalSince1970,
                 "prefix": (environment["STEAM_COMPAT_DATA_PATH"] ?? "") + "/pfx",
                 "environment": environment.filter {
-                    ["DSB_PORT", "DSB_TOKEN", "DSB_RAW", "DSB_LIBRARY", "DSB_PCM"].contains($0.key)
+                    ["DSB_PORT", "DSB_TOKEN", "DSB_RAW", "DSB_LIBRARY", "DSB_PCM", "DSB_PRODUCT"]
+                        .contains($0.key)
                 },
             ], to: info)
     }
@@ -234,7 +252,11 @@ func main() throws -> Int32 {
     while game.isRunning {
         if !disabled, let service = broker, !service.isRunning {
             reconnects.removeAll { Date().timeIntervalSince($0) >= 60 }
-            if service.terminationStatus == 10 && reconnects.count < 3 {
+            // 10: the pad went away. 11: an output write stalled -- a congested
+            // Bluetooth link, not a lost pad, so a fresh broker gets it back.
+            if (service.terminationStatus == 10 || service.terminationStatus == 11)
+                && reconnects.count < 3
+            {
                 reconnects.append(Date())
                 let deadline = Date(timeIntervalSinceNow: 60)
                 while game.isRunning && Date() < deadline {

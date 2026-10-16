@@ -1,0 +1,26 @@
+LIBRARY mmdevapi.dll
+EXPORTS
+    stub2 = mmdevapi_np.#2 @2 NONAME
+    stub3 = mmdevapi_np.#3 @3 NONAME
+    stub4 = mmdevapi_np.#4 @4 NONAME
+    stub5 = mmdevapi_np.#5 @5 NONAME
+    stub6 = mmdevapi_np.#6 @6 NONAME
+    stub7 = mmdevapi_np.#7 @7 NONAME
+    stub8 = mmdevapi_np.#8 @8 NONAME
+    stub9 = mmdevapi_np.#9 @9 NONAME
+    stub10 = mmdevapi_np.#10 @10 NONAME
+    stub11 = mmdevapi_np.#11 @11 NONAME
+    stub12 = mmdevapi_np.#12 @12 NONAME
+    stub13 = mmdevapi_np.#13 @13 NONAME
+    stub14 = mmdevapi_np.#14 @14 NONAME
+    stub15 = mmdevapi_np.#15 @15 NONAME
+    stub16 = mmdevapi_np.#16 @16 NONAME
+    ActivateAudioInterfaceAsync = mmdevapi_np.ActivateAudioInterfaceAsync @17
+    DllCanUnloadNow = mmdevapi_np.DllCanUnloadNow @18
+    DllGetClassObject @19
+    DllRegisterServer = mmdevapi_np.DllRegisterServer @20
+    DllUnregisterServer = mmdevapi_np.DllUnregisterServer @21
+    DriverProc = mmdevapi_np.DriverProc @22
+    auxMessage = mmdevapi_np.auxMessage @23
+    midMessage = mmdevapi_np.midMessage @24
+    modMessage = mmdevapi_np.modMessage @25

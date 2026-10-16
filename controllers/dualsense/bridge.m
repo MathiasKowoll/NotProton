@@ -6,18 +6,19 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <math.h>
 #include "protocol.h"
 #include "descriptor.h"
 #include "Bridge.h"
-static bool enabled, raw, pcmMode;
+static bool enabled, raw, pcmMode, edgeAsStandard;
 static int sock = -1;
 static uint8_t token[16];
 static uint32_t sequence;
 static pthread_mutex_t senderLock = PTHREAD_MUTEX_INITIALIZER;
 static struct sockaddr_in dest;
-static CFDataRef descriptor;
-static CFNumberRef usbInput, usbOutput;
+static CFDataRef descriptor, edgeDescriptor;
+static CFNumberRef usbInput, usbOutput, edgeOutput, standardProduct;
 static bool bluetooth(IOHIDDeviceRef d) {
     if (!enabled) {
         return false;
@@ -32,7 +33,10 @@ static bool bluetooth(IOHIDDeviceRef d) {
         CFNumberGetValue(v, kCFNumberIntType, &pid);
     }
     CFStringRef tr = IOHIDDeviceGetProperty(d, CFSTR(kIOHIDTransportKey));
-    return vid == 0x54c && pid == 0xce6 && tr && CFGetTypeID(tr) == CFStringGetTypeID() &&
+    // The DualSense Edge (0df2) speaks the same reports as the standard pad
+    // (0ce6) on both transports; libScePad accepts exactly these two.
+    return vid == 0x54c && (pid == 0xce6 || pid == 0xdf2) && tr &&
+           CFGetTypeID(tr) == CFStringGetTypeID() &&
            CFStringHasPrefix(tr, CFSTR("Bluetooth"));
 }
 void DSBSendPacket(uint32_t kind, float left, float right, const uint8_t *report, size_t size) {
@@ -85,12 +89,38 @@ __attribute__((constructor)) static void initialize(void) {
     const char *pcm = getenv("DSB_PCM");
     pcmMode = (mode && !strcmp(mode, "1:pcm")) || (pcm && !strcmp(pcm, "1"));
     descriptor = CFDataCreate(NULL, usb_descriptor, sizeof(usb_descriptor));
-    int a = 78, b = 48;
+    edgeDescriptor = CFDataCreate(NULL, edge_usb_descriptor, sizeof(edge_usb_descriptor));
+    // The launcher names the model the game should see. A title whose Sony
+    // library knows only the standard pad gets an Edge presented as one
+    // (NOTPROTON_PAD_AS=dualsense): id, descriptor, output size and name together.
+    const char *product = getenv("DSB_PRODUCT");
+    edgeAsStandard = product && !strcmp(product, "0ce6");
+    int a = 78, b = 48, e = 64, standard = 0xce6;
+    standardProduct = CFNumberCreate(NULL, kCFNumberIntType, &standard);
     usbInput = CFNumberCreate(NULL, kCFNumberIntType, &a);
     usbOutput = CFNumberCreate(NULL, kCFNumberIntType, &b);
+    edgeOutput = CFNumberCreate(NULL, kCFNumberIntType, &e);
     enabled = true;
-    fprintf(stderr, "DSB: Bluetooth bridge loaded pid=%d raw=%d pcm=%d port=%u\n", getpid(), raw,
-            pcmMode, ntohs(dest.sin_port));
+    fprintf(stderr, "DSB: Bluetooth bridge loaded pid=%d raw=%d pcm=%d port=%u%s\n", getpid(), raw,
+            pcmMode, ntohs(dest.sin_port), edgeAsStandard ? " edge-as-standard" : "");
+}
+// The pad as it would look on a cable: an Edge with the Edge's own USB
+// descriptor and output size, a standard pad with the standard one.
+static bool edge(IOHIDDeviceRef d) {
+    int pid = 0;
+    CFTypeRef v = IOHIDDeviceGetProperty(d, CFSTR(kIOHIDProductIDKey));
+    if (v && CFGetTypeID(v) == CFNumberGetTypeID()) {
+        CFNumberGetValue(v, kCFNumberIntType, &pid);
+    }
+    return pid == 0xdf2 && !edgeAsStandard;
+}
+static bool presentedAsStandard(IOHIDDeviceRef d) {
+    int pid = 0;
+    CFTypeRef v = IOHIDDeviceGetProperty(d, CFSTR(kIOHIDProductIDKey));
+    if (v && CFGetTypeID(v) == CFNumberGetTypeID()) {
+        CFNumberGetValue(v, kCFNumberIntType, &pid);
+    }
+    return pid == 0xdf2 && edgeAsStandard;
 }
 static CFTypeRef property(IOHIDDeviceRef d, CFStringRef key) {
     if (raw && bluetooth(d)) {
@@ -101,13 +131,19 @@ static CFTypeRef property(IOHIDDeviceRef d, CFStringRef key) {
             return CFSTR("Sony Interactive Entertainment");
         }
         if (CFEqual(key, CFSTR(kIOHIDReportDescriptorKey))) {
-            return descriptor;
+            return edge(d) ? edgeDescriptor : descriptor;
         }
         if (CFEqual(key, CFSTR(kIOHIDMaxInputReportSizeKey))) {
             return usbInput;
         }
         if (CFEqual(key, CFSTR(kIOHIDMaxOutputReportSizeKey))) {
-            return usbOutput;
+            return edge(d) ? edgeOutput : usbOutput;
+        }
+        if (presentedAsStandard(d) && CFEqual(key, CFSTR(kIOHIDProductIDKey))) {
+            return standardProduct;
+        }
+        if (presentedAsStandard(d) && CFEqual(key, CFSTR(kIOHIDProductKey))) {
+            return CFSTR("DualSense Wireless Controller");
         }
     }
     return IOHIDDeviceGetProperty(d, key);

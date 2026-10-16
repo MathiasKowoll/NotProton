@@ -1391,6 +1391,76 @@ manifest="$steam_root/steamapps/appmanifest_$app_id.acf"
 find_client_root "$STEAM_COMPAT_CLIENT_INSTALL_PATH"
 # Icon stuff
 read_app_meta
+# In a controller-bridge session the Sony pad reaches the game only as a raw
+# HID device. A title Steam does not list for the PS5 controller (store
+# category 57) reads XInput or Steam Input only and would see no controller,
+# so the bridge's xinput1_4 also presents the pad as an XInput pad. A title
+# that speaks Sony keeps the raw device alone. NOTPROTON_PAD_XINPUT=1/0 forces.
+dsb_xinput_pad=0
+# NOTPROTON_PAD_STEAM_INPUT=1 (with direct access and Steam Input on): for a title
+# that reads the pad only through Steam Input (Wo Long, Dynasty Warriors: Origins).
+# Steam keeps the input; the vibration the title sends to Steam's virtual pad
+# through XInput goes to the bridged pad instead of Steam's own emulation.
+dsb_steam_pad=0
+if [ -n "${DSB_PORT:-}" ] && [ "${NOTPROTON_PAD_STEAM_INPUT:-0}" = 1 ]; then
+  dsb_steam_pad=1
+  echo "controllers: Steam Input pad, its vibration goes to the bridged pad" >> "$log" 2>&1 || true
+fi
+if [ -n "${DSB_PORT:-}" ] && [ "$dsb_steam_pad" = 0 ]; then
+  case "${NOTPROTON_PAD_XINPUT:-}" in
+    1) dsb_xinput_pad=1 ;;
+    0) ;;
+    *)
+      if [ -n "${meta:-}" ]; then
+        meta_categories=$(printf '%s\n' "$meta" | sed -n 's/^categories=//p')
+        case ",$meta_categories," in
+          *,57,*) ;;
+          *) dsb_xinput_pad=1 ;;
+        esac
+      fi
+      ;;
+  esac
+  echo "controllers: pad as XInput=$dsb_xinput_pad (categories ${meta_categories:-unknown}, override ${NOTPROTON_PAD_XINPUT:-none})" >> "$log" 2>&1 || true
+fi
+# The bridge's Windows pieces (controllers/dualsense/*.dll) live in the prefix's
+# system32 and are loaded as native (see below). With the bridge on, the prefix's
+# own copy is kept as <name>_np.dll (each piece forwards to it) and the piece
+# takes its place; an older piece is replaced.
+# Without the bridge, the original goes back. Every version of a piece names
+# its log file, C:\notproton-pad.log, which is how one is told from wine's.
+dsb_sys32="${STEAM_COMPAT_DATA_PATH:-}/pfx/drive_c/windows/system32"
+if [ "$verb" = waitforexitandrun ] && [ -d "$dsb_sys32" ]; then
+  for dsb_name in mmdevapi xinput1_4 xinput1_3; do
+    dsb_piece="$np_support/controllers/dualsense/$dsb_name.dll"
+    dsb_dll="$dsb_sys32/$dsb_name.dll"
+    dsb_orig="$dsb_sys32/${dsb_name}_np.dll"
+    [ -f "$dsb_dll" ] || continue
+    dsb_ours=0
+    LC_ALL=C grep -q -a 'notproton-pad.log' "$dsb_dll" 2>/dev/null && dsb_ours=1
+    if [ -n "${DSB_PORT:-}" ] && [ -f "$dsb_piece" ]; then
+      if [ "$dsb_ours" = 0 ]; then
+        if cp -p "$dsb_dll" "$dsb_orig" && cp "$dsb_piece" "$dsb_dll"; then
+          echo "controllers: $dsb_name.dll staged, original kept as ${dsb_name}_np.dll" >> "$log" 2>&1 || true
+        fi
+      elif [ ! -f "$dsb_orig" ]; then
+        echo "controllers: $dsb_name.dll is a bridge piece without its original; left alone" >> "$log" 2>&1 || true
+      elif ! cmp -s "$dsb_piece" "$dsb_dll"; then
+        cp "$dsb_piece" "$dsb_dll" && echo "controllers: $dsb_name.dll updated" >> "$log" 2>&1 || true
+      fi
+      # A piece is a native DLL: without this, wine loads its own builtin from
+      # the runner and the prefix's copy is never used.
+      if LC_ALL=C grep -q -a 'notproton-pad.log' "$dsb_dll" 2>/dev/null && [ -f "$dsb_orig" ]; then
+        dsb_native="${dsb_native:+$dsb_native,}$dsb_name"
+      fi
+    elif [ "$dsb_ours" = 1 ] && [ -f "$dsb_orig" ]; then
+      cp -p "$dsb_orig" "$dsb_dll" && echo "controllers: $dsb_name.dll restored to the original" >> "$log" 2>&1 || true
+    fi
+  done
+fi
+if [ -n "${dsb_native:-}" ]; then
+  export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}$dsb_native=n,b"
+  echo "controllers: $dsb_native loaded from the prefix (n,b)" >> "$log" 2>&1 || true
+fi
 game_name="$meta_name"
 if [ -z "$game_name" ] && [ -f "$manifest" ]; then
   game_name=$(sed -n 's/.*"name"[[:space:]]*"\(.*\)".*/\1/p' "$manifest" | head -1)
@@ -1598,8 +1668,18 @@ else
   echo "=== client staged no overlay renderer, overlay disabled ===" >> "$log" 2>&1 || true
 fi
 set -- --args "$shim_exe" "$@"
+# In the Steam Input route Wine's SDL must see Steam's controller hints, as under
+# Proton: the ignore list keeps the physical pads Steam holds away from the game,
+# and the virtual gamepad is allowed. Without them Wine's SDL exposed the held
+# DualSense Edge as a dead XInput pad in place of Steam's virtual pad (measured
+# with Wo Long: Fallen Dynasty; Devil May Cry 5 got no input the same way). The
+# direct route leaves SDL alone.
+sdl_env=""
+if [ "${NOTPROTON_RAW_CONTROLLERS:-0}" != 1 ] || [ "${NOTPROTON_PAD_STEAM_INPUT:-0}" = 1 ]; then
+  sdl_env=$(env | LC_ALL=C sed -nE 's/^(SDL_GAMECONTROLLER_IGNORE_DEVICES|SDL_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT|SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD)=.*/\1/p')
+fi
 for name in $(env | LC_ALL=C sed -nE 's/^(CX_APPLEGPTK_LIBD3DSHARED_PATH|Steam[A-Za-z0-9]*|(CX_GRAPHICS|D3DM_|DXMT_|DXVK_|MTL_|ROSETTA_)[A-Z0-9_]*)=.*/\1/p') \
-    $runner_option_env; do
+    $sdl_env $runner_option_env; do
   eval "value=\$$name"
   # shellcheck disable=SC2154 # eval assigns value on the line above
   set -- --env "$name=$value" "$@"
@@ -1611,9 +1691,12 @@ set -- \
   --env DSB_SESSION="${DSB_SESSION:-}" \
   --env DSB_LIBRARY="${DSB_LIBRARY:-}" \
   --env DSB_PORT="${DSB_PORT:-}" \
+  --env DSB_PRODUCT="${DSB_PRODUCT:-}" \
   --env DSB_TOKEN="${DSB_TOKEN:-}" \
   --env DSB_RAW="${DSB_RAW:-}" \
   --env DSB_PCM="${DSB_PCM:-}" \
+  --env DSB_XINPUT_PAD="$dsb_xinput_pad" \
+  --env DSB_STEAM_PAD="$dsb_steam_pad" \
   --env CX_ROOT="$CX_ROOT" \
   --env CX_HOME="$CX_HOME" \
   --env WINESERVER="$WINESERVER" \

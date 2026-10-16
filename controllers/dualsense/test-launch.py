@@ -90,10 +90,15 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
         args, env=dict(env, TEST_CHILD_EXIT="23"), capture_output=True, timeout=12
     )
     assert result.returncode == 23
+    # A broker that never becomes ready no longer keeps the game from starting:
+    # it runs without the bridge, and the status says why.
     result = subprocess.run(
-        args, env=dict(env, TEST_BAD_READY="1"), capture_output=True, timeout=12
+        args, env=dict(env, TEST_BAD_READY="1"), capture_output=True, text=True, timeout=12
     )
-    assert result.returncode == 70 and not (root / "sessions/999999.json").exists()
+    assert result.returncode == 0, result.stderr
+    assert not (root / "sessions/999999.json").exists()
+    assert json.loads((root / "sessions/999999-status.json").read_text())["route"] == "broker-failed"
+    assert json.loads(result.stdout.splitlines()[-1])["DSB_LIBRARY"] is None
     print("  ok    child exit status and failed initialization cleanup", flush=True)
 
     resumed = subprocess.Popen(
@@ -137,8 +142,10 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
         assert stat.S_IMODE(record.parent.stat().st_mode) == 0o700
         info = json.loads(record.read_text())
         assert len(info["environment"]["DSB_TOKEN"]) == 32
-        rival = subprocess.run(args, env=env, capture_output=True, timeout=10)
-        assert rival.returncode == 70, rival.stderr
+        # A second direct-controller game starts without the bridge.
+        rival = subprocess.run(args, env=env, capture_output=True, text=True, timeout=10)
+        assert rival.returncode == 0, rival.stderr
+        assert json.loads(rival.stdout.splitlines()[-1])["DSB_LIBRARY"] is None
         assert record.exists(), "rival must not remove the owning session"
         assert owner.poll() is None
         assert json.loads(record.read_text())["brokerPid"] == info["brokerPid"]

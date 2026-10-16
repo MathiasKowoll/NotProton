@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <mach/mach.h>
@@ -32,6 +33,8 @@ static GCDualSenseGamepad *nativePad;
 static double resetGrace, lastActive[2], releaseAt[2];
 static uint8_t releaseEffect[2][11];
 static unsigned suppressedResets[2];
+// Trigger effects received per side (0 = R2 at offset 10, 1 = L2 at offset 21).
+static unsigned triggerUpdates[2];
 static uint64_t ledCommands, playerCommands;
 static uint32_t ledSource;
 static uint8_t ledRGB[3], playerLED;
@@ -94,6 +97,7 @@ static void queueOutput(const uint8_t *usb) {
         if (!(src[0] & bit)) {
             continue;
         }
+        triggerUpdates[side]++;
         const uint8_t *effect = src + offset;
         if (effect[0] == 0x21) {
             lastActive[side] = now;
@@ -158,13 +162,15 @@ static void *outputWorker(void *unused) {
                     pthread_mutex_lock(&dsb.outputLock);
                     memcpy(dsb.lastSent, snapshot, 47);
                     dsb.haveLast = true;
-                    NSMutableArray *r2 = [NSMutableArray array];
+                    NSMutableArray *r2 = [NSMutableArray array], *l2 = [NSMutableArray array];
                     for (int i = 10; i < 21; i++) {
                         [r2 addObject:@(payload[i])];
+                        [l2 addObject:@(payload[i + 11])];
                     }
                     [dsb.sentHistory addObject:@{
                         @"at" : @([[NSDate date] timeIntervalSince1970]),
-                        @"r2" : r2
+                        @"r2" : r2,
+                        @"l2" : l2
                     }];
                     if (dsb.sentHistory.count > 40) {
                         [dsb.sentHistory removeObjectAtIndex:0];
@@ -297,7 +303,7 @@ static Source sources[64];
 
 // Source state and metrics are owned by the session's main run loop.
 typedef struct {
-    uint64_t accepted, dropped, levels, outputs;
+    uint64_t accepted, dropped, levels, outputs, envelopeUpdates;
     float left, right, peakLeft, peakRight;
 } SessionMetrics;
 
@@ -357,13 +363,33 @@ static void receivePackets(int fd, const uint8_t token[16], double now, SessionM
             s->lastLevelAt = now;
             s->levelLeft = fmaxf(0, fminf(1, p.left));
             s->levelRight = fmaxf(0, fminf(1, p.right));
-            metrics->levels++;
+            if (!dsb.pcmMode) {
+                metrics->levels++;
+            }
         } else if (dsb.pcmMode && p.kind == DSB_PCM && (p.report[0] == 0 || p.report[0] == 30)) {
             DSBPCMReceive(&p);
             s->lastLevelAt = now;
             metrics->levels++;
         } else if (p.kind == DSB_OUTPUT && p.report[0] == 2) {
             const uint8_t *b = p.report + 1;
+            // What a game asks of the pad, even what is not acted on: each new
+            // combination of the valid flags (0, 1, 2) and the motor bytes, once.
+            {
+                static uint64_t seen[40];
+                static unsigned count;
+                uint64_t k = (uint64_t)b[0] | (uint64_t)b[1] << 8 | (uint64_t)b[38] << 16 |
+                             (uint64_t)b[2] << 24 | (uint64_t)b[3] << 32 | (uint64_t)p.pid << 40;
+                bool known = false;
+                for (unsigned i = 0; i < count; i++) {
+                    known |= seen[i] == k;
+                }
+                if (!known && count < 40) {
+                    seen[count++] = k;
+                    fprintf(stderr,
+                            "Output source=%u flags=%02x/%02x/%02x motors R=%u L=%u triggers R=%02x L=%02x\n",
+                            p.pid, b[0], b[1], b[38], b[2], b[3], b[10], b[21]);
+                }
+            }
             if (b[1] & 4) {
                 if (!ledCommands || memcmp(ledRGB, b + 44, 3) || ledSource != p.pid) {
                     fprintf(stderr, "LED source=%u rgb=%u,%u,%u flags=%02x/%02x\n", p.pid, b[44],
@@ -397,6 +423,19 @@ static void receivePackets(int fd, const uint8_t token[16], double now, SessionM
     }
 }
 
+// A wired pad holds the last motor values until it is told otherwise, and games
+// write 0x02 when the value changes. Expiring a value half a second after it was
+// written cut every longer rumble short. It is held while its source is alive:
+// any packet from it in the last two seconds, the same window that frees a slot.
+static bool rumbleHeld(const Source *s, double now) {
+    return s->lastRumbleAt &&
+           (now - s->lastRumbleAt < .5 || now - s->lastPacketAt < 2);
+}
+
+static bool moved(uint8_t value, uint8_t sent) {
+    return value != sent && (!value || abs((int)value - (int)sent) >= 4);
+}
+
 static bool updateEffects(double now, float pcmGain, SessionMetrics *metrics) {
     pthread_mutex_lock(&dsb.outputLock);
     for (int side = 0; side < 2; side++) {
@@ -411,26 +450,42 @@ static bool updateEffects(double now, float pcmGain, SessionMetrics *metrics) {
     float l = 0, r = 0;
     for (int i = 0; i < 64; i++) {
         Source *s = sources + i;
-        if (now - s->lastLevelAt < .15) {
+        if (!dsb.pcmMode && now - s->lastLevelAt < .15) {
             l = fmaxf(l, DSBCalibratedPCM(s->levelLeft, pcmGain));
             r = fmaxf(r, DSBCalibratedPCM(s->levelRight, pcmGain));
         }
-        if (now - s->lastRumbleAt < .5) {
+        if (rumbleHeld(s, now)) {
             l = fmaxf(l, s->rumbleLeft);
             r = fmaxf(r, s->rumbleRight);
         }
     }
     if (dsb.pcmMode) {
         float a = 0, b = 0;
+        // While the link is too slow for PCM, the haptic audio would otherwise be
+        // dropped; its envelope drives the motors instead, as it does without PCM.
+        bool envelope = DSBPCMSuspended();
         for (int i = 0; i < 64; i++) {
-            if (now - sources[i].lastRumbleAt < .5) {
+            if (rumbleHeld(sources + i, now)) {
                 a = fmaxf(a, sources[i].rumbleLeft);
                 b = fmaxf(b, sources[i].rumbleRight);
             }
+            if (envelope && now - sources[i].lastLevelAt < .15) {
+                float el = DSBCalibratedPCM(sources[i].levelLeft, pcmGain),
+                      er = DSBCalibratedPCM(sources[i].levelRight, pcmGain);
+                if (el > a || er > b) {
+                    metrics->envelopeUpdates++;
+                }
+                a = fmaxf(a, el);
+                b = fmaxf(b, er);
+            }
         }
+        l = fmaxf(l, a);
+        r = fmaxf(r, b);
         uint8_t left = (uint8_t)lrintf(a * 255), right = (uint8_t)lrintf(b * 255);
         pthread_mutex_lock(&dsb.outputLock);
-        if (left != dsb.legacyLeft || right != dsb.legacyRight) {
+        // A change under 4 of 255 is not felt but costs a Bluetooth write; the
+        // envelope moves on every audio buffer. Reaching zero always goes out.
+        if (moved(left, dsb.legacyLeft) || moved(right, dsb.legacyRight)) {
             dsb.legacyLeft = left;
             dsb.legacyRight = right;
             dsb.legacyDirty = true;
@@ -460,14 +515,18 @@ static void writeStatus(NSString *status, unsigned port, float pcmGain,
                         const SessionMetrics *metrics) {
     NSDictionary *pcmStats = DSBPCMSnapshot();
     pthread_mutex_lock(&dsb.outputLock);
-    NSMutableArray *r2 = [NSMutableArray array];
+    NSMutableArray *r2 = [NSMutableArray array], *l2 = [NSMutableArray array];
     for (int i = 10; i < 21; i++) {
         [r2 addObject:@(dsb.pending[i])];
+        [l2 addObject:@(dsb.pending[i + 11])];
     }
     NSDictionary *triggers = @{
         @"resetGraceMs" : @(resetGrace * 1000),
         @"suppressedR2Resets" : @(suppressedResets[0]),
+        @"suppressedL2Resets" : @(suppressedResets[1]),
         @"r2" : r2,
+        @"l2" : l2,
+        @"updates" : @{@"r2" : @(triggerUpdates[0]), @"l2" : @(triggerUpdates[1])},
         @"sentHistory" : [dsb.sentHistory copy],
         @"physicalR2Mode" : @(dsb.pcmMode ? -1 : nativePad.rightTrigger.mode),
         @"physicalR2Status" : @(dsb.pcmMode ? -1 : nativePad.rightTrigger.status)
@@ -489,6 +548,7 @@ static void writeStatus(NSString *status, unsigned port, float pcmGain,
         @"accepted" : @(metrics->accepted),
         @"dropped" : @(metrics->dropped),
         @"pcmBlocks" : @(metrics->levels),
+        @"envelopeUpdates" : @(metrics->envelopeUpdates),
         @"pcmGain" : @(pcmGain),
         @"outputCommands" : @(metrics->outputs),
         @"hidReports" : @(atomic_load(&dsb.reports)),
@@ -572,10 +632,12 @@ static int openController(bool probe, IOHIDManagerRef *owner) {
     if (!manager) {
         return 4;
     }
-    IOHIDManagerSetDeviceMatching(
-        manager, (__bridge CFDictionaryRef)
-                     @{@kIOHIDVendorIDKey : @0x54c,
-                       @kIOHIDProductIDKey : @0xce6});
+    // Both DualSense models: the standard pad (0ce6) and the Edge (0df2).
+    IOHIDManagerSetDeviceMatchingMultiple(
+        manager, (__bridge CFArrayRef) @[
+            @{@kIOHIDVendorIDKey : @0x54c, @kIOHIDProductIDKey : @0xce6},
+            @{@kIOHIDVendorIDKey : @0x54c, @kIOHIDProductIDKey : @0xdf2}
+        ]);
     if (IOHIDManagerOpen(manager, 0)) {
         return 4;
     }
@@ -590,6 +652,9 @@ static int openController(bool probe, IOHIDManagerRef *owner) {
             } else if ([transport hasPrefix:@"Bluetooth"]) {
                 bt++;
                 dsb.hid = d;
+                NSNumber *product =
+                    (__bridge NSNumber *)IOHIDDeviceGetProperty(d, CFSTR(kIOHIDProductIDKey));
+                dsb.product = product ? product.unsignedShortValue : 0xce6;
             }
         }
         if (dsb.hid) {
@@ -598,8 +663,8 @@ static int openController(bool probe, IOHIDManagerRef *owner) {
         CFRelease(devices);
     }
     if (probe) {
-        printf("{\"bluetooth\":%u,\"usb\":%u,\"eligible\":%s}\n", bt, usb,
-               bt == 1 && !usb ? "true" : "false");
+        printf("{\"bluetooth\":%u,\"usb\":%u,\"eligible\":%s,\"product\":\"%04x\"}\n", bt,
+               usb, bt == 1 && !usb ? "true" : "false", bt == 1 ? dsb.product : 0);
         return 0;
     }
     if (bt != 1 || usb) {

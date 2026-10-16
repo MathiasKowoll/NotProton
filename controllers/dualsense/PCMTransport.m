@@ -302,13 +302,15 @@ void *DSBPCMWorker(void *unused) {
                         memcpy(dsb.lastSent, snapshot, 47);
                         dsb.haveLast = true;
                     }
-                    NSMutableArray *r2 = [NSMutableArray array];
+                    NSMutableArray *r2 = [NSMutableArray array], *l2 = [NSMutableArray array];
                     for (int i = 10; i < 21; i++) {
                         [r2 addObject:@(snapshot[i])];
+                        [l2 addObject:@(snapshot[i + 11])];
                     }
                     [dsb.sentHistory addObject:@{
                         @"at" : @([[NSDate date] timeIntervalSince1970]),
-                        @"r2" : r2
+                        @"r2" : r2,
+                        @"l2" : l2
                     }];
                     if (dsb.sentHistory.count > 40) {
                         [dsb.sentHistory removeObjectAtIndex:0];
@@ -456,6 +458,9 @@ bool DSBPCMStartInput(void) {
     return true;
 }
 
+bool DSBPCMSuspended(void) {
+    return atomic_load(&pcmSuspended);
+}
 bool DSBPCMWorkerIsReady(void) {
     return atomic_load(&pcmWorkerReady);
 }

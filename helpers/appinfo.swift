@@ -1,5 +1,5 @@
 // Reads Steam's appinfo.vdf cache and prints key=value metadata for one app on
-// stdout. Usage: appinfo <appinfo.vdf> <appid>.
+// stdout (name, icon, clienticon, logo, categories). Usage: appinfo <appinfo.vdf> <appid>.
 //
 // common/icon is a 32x32 thumbnail. common/clienticon is the real multi-res
 // icon, and the two hashes differ for most apps, so the icon cannot be
@@ -191,6 +191,16 @@ do {
         let flat = v.replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
         print("\(key)=\(flat)")
+    }
+    // Store categories, e.g. 57 = PS5 controller support, 58 = also over
+    // Bluetooth. The controller bridge decides from them whether a title
+    // speaks Sony or needs the pad presented as XInput.
+    if case .section(let categories)? = common["category"] {
+        let ids = categories.keys.compactMap { key -> Int? in
+            guard key.hasPrefix("category_") else { return nil }
+            return Int(key.dropFirst("category_".count))
+        }.sorted()
+        if !ids.isEmpty { print("categories=" + ids.map(String.init).joined(separator: ",")) }
     }
 } catch {
     fputs("appinfo: cannot parse \(args[1]): \(error)\n", stderr)
