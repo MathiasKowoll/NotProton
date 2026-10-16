@@ -542,7 +542,7 @@ $(DUALSENSE_OUT)/bridge.dylib: $(DUALSENSE_SRC)/bridge.m $(DUALSENSE_SRC)/AudioF
 	$(CC) -dynamiclib -arch arm64 -arch x86_64 -mmacosx-version-min=$(MIN_VER) -O2 -Wall $(filter %.m,$^) -framework Foundation -framework IOKit -framework CoreAudio -framework AudioUnit -lz -o $@
 	codesign -f -s - --identifier com.notproton.dualsense.bridge $@
 
-$(DUALSENSE_OUT)/broker: $(DUALSENSE_SRC)/broker.m $(DUALSENSE_SRC)/PCMTransport.m $(DUALSENSE_HEADERS)
+$(DUALSENSE_OUT)/broker: $(DUALSENSE_SRC)/broker.m $(DUALSENSE_SRC)/DualSense.m $(DUALSENSE_SRC)/PCMTransport.m $(DUALSENSE_HEADERS)
 	@mkdir -p $(DUALSENSE_OUT)
 	$(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -O2 -Wall -fobjc-arc $(filter %.m,$^) -framework AudioToolbox -framework AppKit -framework GameController -framework CoreHaptics -framework IOKit -lz -o $@
 	codesign -f -s - --identifier com.notproton.dualsense.broker $@

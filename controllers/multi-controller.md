@@ -47,17 +47,17 @@ report. The order after that is:
 | Piece | Where | What it does | Neutral? |
 |---|---|---|---|
 | Session supervisor | `dualsense/launch.swift` `main` | Probes the pad, takes `sessions/controller.lock`, makes the token, starts the broker, passes the per-title options, runs the game. | Mostly. The probe result and the bypass reasons name the DualSense; eligibility is "exactly one Bluetooth DualSense, no USB one". |
-| Probe and open | `dualsense/broker.m` `openController` | Matches `054c:0ce6` and `054c:0df2` and counts the Bluetooth and USB ones. | No. |
+| Probe and open | `dualsense/DualSense.m` `openController` | Matches `054c:0ce6` and `054c:0df2` and counts the Bluetooth and USB ones. | No. |
 | Packet envelope | `dualsense/protocol.h` `DSBPacket` | Magic, token, pid, sequence, timestamp, two floats, 64 bytes. | Yes. |
 | Motor packets | `xinput/xinput-motors.c` `send_motors_locked`, `dinput/dinput-ff.c` | Motor values sent as `DSB_MOTORS`: the two values in the envelope's floats, no report (step 1). | Yes. |
-| Source model | `broker.m` `receivePackets`, `rumbleHeld`, `moved` | Folds every source's motors, holds a value while its source is alive, deadband of 4/255. | Yes, but it lives beside the DualSense state (`dsb.pending`, a 47-byte Sony payload). |
-| Control writer | `broker.m` `outputWorker`, `Controls.h` `DSBControlDelta` | Bluetooth report `0x31` with CRC32 (seed `0xa2`); triggers, lightbar, player and mic LEDs. | No. |
+| Source model | `broker.m` `receivePackets`, `rumbleHeld`, `updateEffects` | Folds every source's motors and haptic-audio envelope, and holds a value while its source is alive. | Yes: the core since step 2. The deadband (`moved`) is the DualSense backend's. |
+| Control writer | `DualSense.m` `outputWorker`, `Controls.h` `DSBControlDelta` | Bluetooth report `0x31` with CRC32 (seed `0xa2`); triggers, lightbar, player and mic LEDs. | No. |
 | PCM writer | `dualsense/PCMTransport.m` | Haptic reports `0x32` at about 47/s, input-rate check, suspends under 100 Hz. | No. |
 | Rumble synthesis | `dualsense/PCM.h` `DSBRumbleSynthBlock` | Turns the two motor values into a 65 Hz and a 160 Hz tone. | Yes, as a signal. Its packing into `0x32` is Sony's. |
 | Trigger effects | `Controls.h` `DSBTriggerFeedback`, `DSBTriggerWeapon`, `DSBTriggerVibration`, `DSBTriggerPreset` | DualSense trigger modes `0x21`, `0x25`, `0x26`, `0x05`. | No. |
-| Trigger spec | `Controls.h` `DSBParseTriggers`, `DSBTriggerActive`, `DSBTriggerPressed` | `NOTPROTON_PAD_TRIGGERS` grammar, two choices per side, the press/release thresholds. | Yes. `R2` and `L2` can be read as "right" and "left trigger". |
-| Trigger waits | `broker.m` `updateTriggerWaits`, `BrokerInternal.h` `DSBNotePadInput` | Switch a side's effect on the other trigger's position. | The logic is neutral. The input positions come from Bluetooth report `0x31`, bytes 6 and 7. |
-| Core Haptics fallback | `broker.m` `prepare`, `setLevel`, `renewPlayers` | Without PCM, the motors drive `GCController.haptics` engines on the left and right handle localities. | Nearly. Only the `GCDualSenseGamepad` class check and `nativePad` are DualSense. |
+| Trigger spec | `TriggerSpec.h` `DSBParseTriggers`, `DSBTriggerActive`, `DSBTriggerPressed` | `NOTPROTON_PAD_TRIGGERS` grammar, two choices per side, the press/release thresholds, rumble steps. | Yes. `R2` and `L2` can be read as "right" and "left trigger". |
+| Trigger waits | `broker.m` `updateTriggerWaits`, `Session.h` `DSBNoteTriggerPositions` | Switch a side's effect on the other trigger's position. | Yes. The DualSense backend reads the positions from Bluetooth report `0x31`, bytes 6 and 7 (`BrokerInternal.h` `DSBNotePadInput`). |
+| Core Haptics fallback | `DualSense.m` `prepare`, `setLevel`, `renewPlayers` | Without PCM, the motors drive `GCController.haptics` engines on the left and right handle localities. | Nearly. Only the `GCDualSenseGamepad` class check and `nativePad` are DualSense. |
 | HID presentation | `dualsense/bridge.m` | Inside Wine: presents the Bluetooth pad as a USB one (descriptor, report sizes, transport, the Edge as a standard pad); answers feature `08/02`; turns input `0x31` into `0x01`; sends output `0x02` to the broker. | No. Games speak Sony HID to a DualSense. |
 | Haptic audio endpoint | `dualsense/AudioFacade.m`, `mmdevapi/mmdevapi-container.c` | A 4-channel endpoint for haptic audio, and its ContainerId. | No. |
 | XInput pad | `xinput-motors.c` `init_pad`, `open_pad`, `pad_reader` | Builds an XInput pad from the pad's HID input reports. Forwards vibration only for vendor `054c`. | The presentation is neutral. Input decoding and the vendor gate are Sony. |
@@ -112,46 +112,48 @@ core file:
 
 ### The backend interface
 
-A backend is the only writer to its pad. A C table, chosen by the probe:
+Built in step 2. A backend is the only writer to its pad. Its interface is
+`DSBBackend` in `controllers/dualsense/Session.h`, and the DualSense's is
+`DSBDualSenseBackend` in `DualSense.m`:
 
-```c
-typedef struct {
-    const char *name;                     // "dualsense", "gamecontroller", "switch-pro"
-    unsigned caps;                        // DSB_CAP_MOTORS | _HAPTICS | _TRIGGER_FORCE |
-                                          // _TRIGGER_RUMBLE | _LIGHTS | _INPUT
-    // Probe: how many of its pads are present on each transport, and whether
-    // the session can take exactly one.
-    bool (*probe)(DSBProbe *out);
-    bool (*open)(void);
-    // Decoded input, for waits and for the XInput pad: trigger positions at
-    // least, the whole pad state when the backend presents an XInput pad.
-    bool (*input)(DSBPadInput *out);
-    bool (*motors)(uint8_t left, uint8_t right);
-    // Optional; NULL when caps lacks the bit.
-    bool (*haptics)(float left, float right);   // fine haptics from the motor values
-    bool (*trigger)(int side, uint8_t kind, uint8_t strength, uint8_t motor);
-    bool (*release)(void);                      // what the session set, nothing else
-} DSBBackend;
-```
+| Member | What the core asks of it |
+|---|---|
+| `argument` | A flag only this backend knows (the DualSense's `--pcm`, `--trigger-reset-grace-ms`). |
+| `open` | Probe (one JSON line about the pads present) or open the pad; an exit status on failure. |
+| `abilities` | What the opened pad can do: `DSB_CAN_HAPTICS` (rumble on fine haptics), `DSB_CAN_AUDIO` (haptic audio as a stream), `DSB_CAN_READ_TRIGGERS` (trigger positions for waits). |
+| `realTime` | Whether the run loop wakes on the socket every 2 ms (PCM) or turns every 10 ms. |
+| `start` | Start writing once the socket exists. |
+| `accepts`, `receive` | Packets only this pad understands: a game's own output report, haptic audio, and in a dry run a pad input report. `receive` says which trigger sides a game wrote and which motor values it set. |
+| `update` | Every turn: play the motor values and haptic-audio envelope the core folded (`DSBMotorState`). |
+| `trigger` | An abstract trigger effect: a `TriggerSpec.h` kind and strength, a rumble amplitude, or a release. |
+| `failed`, `status`, `counters` | The writer stalled or the pad went away; its part of the status file; its write counters. |
+| `stop` | Release what the session set, stop writing, close the pad; the exit status and final state. |
 
-How the core uses it:
+What the core does with it (`broker.m`):
 
-- The core keeps `DSBTriggerSpec` as it is. When a backend lacks a capability, the
-  core declines the option with one log line, as the broker does today for
-  `--rumble-haptics` without PCM.
-- `trigger` receives an abstract effect. The DualSense backend turns it into the
-  bytes `Controls.h` writes today; an Xbox backend would accept only `vibrate` and
-  `rumble`.
-- Lights are left out of the first version. On the DualSense, games and Steam
-  write them today and the bridge passes them through.
+- It keeps the packets and their sources, the motor values folded from them, the
+  trigger spec, waits, rumble triggers and game ownership, and the status file.
+- It declines an option the pad's `abilities` cannot honour, with one log line:
+  rumble haptics without `DSB_CAN_HAPTICS`, waits without
+  `DSB_CAN_READ_TRIGGERS`.
+- A backend reports trigger positions with `DSBNoteTriggerPositions`, and the
+  core reads them for waits.
+- The grammar and the rumble steps are in `TriggerSpec.h`. The DualSense's trigger
+  modes stay in `Controls.h`.
+
+Not yet done:
+
+- Dry runs still go through the DualSense backend, so the tests read Sony bytes.
+  A recording backend would let the core's tests check calls instead.
+- Lights are left out of the interface. On the DualSense, games and Steam write
+  them, and the bridge passes them through.
 
 ### On the wire
 
-Add one packet kind, `DSB_MOTORS`, carrying the two motor values in the existing
+Done in step 1. `DSB_MOTORS` carries the two motor values in the envelope's
 `left` and `right` floats and nothing in `report`:
 
-- `xinput-motors.c` and `dinput-ff.c` send it instead of a Sony `0x02`.
-- The broker accepts both for a while.
+- `xinput-motors.c` and `dinput-ff.c` send it.
 - `DSB_OUTPUT` stays for what it really is: a game's own DualSense output report,
   which only the DualSense backend reads.
 
@@ -225,7 +227,7 @@ Every step keeps the DualSense working. Each runs `make dualsense-check` and
    - Tests: `test-rumble-haptics.py` sends both forms and gets the same synth and
      motor results.
    - No change on a pad.
-2. **Split the broker.** Move the source model, the per-title options and the
+2. **Split the broker.** *Done, except the recording backend.* Move the source model, the per-title options and the
    waits into a core file. Move `outputWorker`, `PCMTransport.m`, the trigger
    layouts and `openController` behind a DualSense `DSBBackend`.
    - This is a refactor: every existing test must pass unchanged.

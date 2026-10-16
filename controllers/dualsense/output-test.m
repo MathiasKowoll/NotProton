@@ -18,10 +18,10 @@ static IOReturn mockSetReport(IOHIDDeviceRef device, IOHIDReportType type, CFInd
 }
 
 #define IOHIDDeviceSetReport mockSetReport
-#define main brokerMain
-#include "broker.m"
-#undef main
+#include "DualSense.m"
 #undef IOHIDDeviceSetReport
+
+DSBSession session;
 
 static bool writeSucceeded;
 static void *writeOnWorker(void *unused) {

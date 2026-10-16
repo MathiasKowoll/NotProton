@@ -1,314 +1,42 @@
-#import <AppKit/AppKit.h>
-#import <GameController/GameController.h>
-#import <CoreHaptics/CoreHaptics.h>
-#import <IOKit/hid/IOHIDManager.h>
+// The controller broker's device-neutral core: one session's authenticated
+// packets and the sources they come from, the motor values folded from them,
+// the per-title trigger and rumble options, and the status file. Everything a
+// pad does is its backend's (Session.h; the DualSense's is DualSense.m).
+#import <Foundation/Foundation.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
-#include <zlib.h>
 #include <stdlib.h>
-#include <pthread.h>
-#include <stdatomic.h>
-#include <mach/mach.h>
 #include <limits.h>
-#include <time.h>
-#include "BrokerInternal.h"
-#include "protocol.h"
+#include <math.h>
+#include "Session.h"
 #include "Calibration.h"
-#include "Controls.h"
-#include "PCM.h"
+#include "TriggerSpec.h"
 
 // Local per-session service. Only receives packets bearing the launch token.
-// --pcm selects the bounded direct PCM transport; default retains Core Haptics.
-static CHHapticEngine *engines[2];
-static atomic_bool engineRunning[2];
-static id<CHHapticPatternPlayer> players[2];
-static float lastLevel[2] = {-1, -1};
-static CHHapticPattern *silentPattern;
-static double playerStart;
-static GCDualSenseGamepad *nativePad;
-// Optional grace period for interleaved active-trigger and reset commands.
-// Off commands are delayed only briefly after an active feedback command.
-// A genuine release is applied within resetGrace; effect bytes stay unchanged.
-static double resetGrace, lastActive[2], releaseAt[2];
-static uint8_t releaseEffect[2][11];
-static unsigned suppressedResets[2];
-// Trigger effects received per side (0 = R2 at offset 10, 1 = L2 at offset 21).
-static unsigned triggerUpdates[2];
-// --triggers: per-trigger effects for titles that write none (kinds[0] R2,
-// kinds[1] L2). A side the game writes itself becomes the game's for good.
+DSBSession session;
+static const DSBBackend *backend = &DSBDualSenseBackend;
+static unsigned abilities;
+// --triggers: per-trigger effects for titles that write none (kind[0] R2,
+// kind[1] L2). A side the game writes itself becomes the game's for good.
 static const char *triggerSpec;
 static DSBTriggerSpec triggerChoice;
-// A side whose effect waits for the other trigger: whether that trigger is
-// held now, and how often the effect went on or off.
+// A side with an effect for while the other trigger is pressed: whether that
+// trigger is held now, and how often the side changed effect.
 static bool waitHeld[2];
 static uint64_t triggerWaitChanges;
 static bool gameOwnsTrigger[2];
 static uint8_t triggerRumbleStep[2];
 static double triggerRumbleAt[2];
 static uint64_t triggerRumbleUpdates;
-static uint64_t ledCommands, playerCommands;
-static uint32_t ledSource;
-static uint8_t ledRGB[3], playerLED;
-DSBBrokerState dsb = {.outputLock = PTHREAD_MUTEX_INITIALIZER};
-static uint64_t writeTimeoutNS(void) {
-    return dsb.pcmMode ? 80000000 : 250000000;
-}
-
-static bool markWriteTimeout(uint64_t started) {
-    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    if (!started || now - started <= writeTimeoutNS() ||
-        atomic_load(&dsb.writeStartedNS) != started) {
-        return false;
-    }
-    if (!atomic_exchange(&dsb.stalled, true)) {
-        atomic_fetch_add(&dsb.errors, 1);
-        fprintf(stderr, "HID output timed out after %.1f ms\n", (now - started) / 1e6);
-    }
-    return true;
-}
-
-bool DSBOutputWriteTimedOut(void) {
-    return markWriteTimeout(atomic_load(&dsb.writeStartedNS));
-}
-
-bool DSBWriteOutput(const uint8_t *report, unsigned size) {
-    if (atomic_load(&dsb.stalled)) {
-        return false;
-    }
-    uint64_t started = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    atomic_store(&dsb.writeStartedNS, started);
-    IOReturn result =
-        dsb.dry ? kIOReturnSuccess
-                : IOHIDDeviceSetReport(dsb.hid, kIOHIDReportTypeOutput, report[0], report, size);
-    markWriteTimeout(started);
-    atomic_store(&dsb.writeStartedNS, 0);
-    atomic_fetch_add(&dsb.reports, 1);
-    if (result) {
-        atomic_fetch_add(&dsb.errors, 1);
-        atomic_store(&dsb.stalled, true);
-        fprintf(stderr, "HID output failed: error=0x%x report=0x%02x size=%u\n", result, report[0],
-                size);
-    }
-    return !atomic_load(&dsb.stalled);
-}
 
 static void stopSignal(int s) {
-    dsb.quitting = 1;
+    session.quitting = 1;
 }
 // Read readiness wakes the run loop immediately; the main loop drains and
 // authenticates datagrams before rearming this source.
 static void socketReady(CFFileDescriptorRef descriptor, CFOptionFlags flags, void *context) {}
-static void queueOutput(const uint8_t *usb) {
-    const uint8_t *src = usb + 1;
-    pthread_mutex_lock(&dsb.outputLock);
-    // Merge independent valid fields, optionally defer transient trigger resets.
-    double now = CFAbsoluteTimeGetCurrent();
-    for (int side = 0; side < 2; side++) {
-        unsigned bit = 4u << side, offset = 10 + side * 11;
-        if (!(src[0] & bit)) {
-            continue;
-        }
-        triggerUpdates[side]++;
-        if (!dsb.quitting) {
-            gameOwnsTrigger[side] = true;
-        }
-        const uint8_t *effect = src + offset;
-        if (effect[0] == 0x21) {
-            lastActive[side] = now;
-            releaseAt[side] = 0;
-        } else if (resetGrace > 0 && (effect[0] == 5 || effect[0] == 0) &&
-                   dsb.pending[offset] == 0x21 && now - lastActive[side] < resetGrace) {
-            releaseAt[side] = lastActive[side] + resetGrace;
-            memcpy(releaseEffect[side], effect, 11);
-            suppressedResets[side]++;
-            continue;
-        } else {
-            releaseAt[side] = 0;
-        }
-        dsb.pending[0] |= bit;
-        memcpy(dsb.pending + offset, effect, 11);
-    }
-    if (src[1] & 4) {
-        dsb.pending[1] |= 4;
-        memcpy(dsb.pending + 44, src + 44, 3);
-    }
-    if (src[1] & 0x10) {
-        dsb.pending[1] |= 0x10;
-        dsb.pending[43] = src[43];
-    }
-    if (src[1] & 1) {
-        dsb.pending[1] |= 1;
-        dsb.pending[8] = src[8];
-    }
-    dsb.outputDirty = dsb.pending[0] || dsb.pending[1];
-    pthread_mutex_unlock(&dsb.outputLock);
-    if (dsb.pcmMode) {
-        DSBPCMNotify();
-    }
-}
-static void *outputWorker(void *unused) {
-    @autoreleasepool {
-        while (atomic_load(&dsb.workerRunning)) {
-            @autoreleasepool {
-                uint8_t payload[47], snapshot[47];
-                bool changed = false;
-                pthread_mutex_lock(&dsb.outputLock);
-                if (dsb.outputDirty) {
-                    memcpy(snapshot, dsb.pending, 47);
-                    dsb.outputDirty = false;
-                    changed = DSBControlDelta(snapshot, dsb.lastSent, dsb.haveLast, payload);
-                }
-                pthread_mutex_unlock(&dsb.outputLock);
-                if (changed && !atomic_load(&dsb.stalled)) {
-                    uint8_t b[78] = {0x31};
-                    b[1] = (dsb.btSequence++ & 15) << 4;
-                    b[2] = 0x10;
-                    memcpy(b + 3, payload, 47);
-                    uint8_t seed = 0xa2;
-                    uLong crc = crc32(0, &seed, 1);
-                    crc = crc32(crc, b, 74);
-                    for (int i = 0; i < 4; i++) {
-                        b[74 + i] = crc >> (8 * i);
-                    }
-                    if (!DSBWriteOutput(b, sizeof(b))) {
-                        break;
-                    }
-                    pthread_mutex_lock(&dsb.outputLock);
-                    memcpy(dsb.lastSent, snapshot, 47);
-                    dsb.haveLast = true;
-                    NSMutableArray *r2 = [NSMutableArray array], *l2 = [NSMutableArray array];
-                    for (int i = 10; i < 21; i++) {
-                        [r2 addObject:@(payload[i])];
-                        [l2 addObject:@(payload[i + 11])];
-                    }
-                    [dsb.sentHistory addObject:@{
-                        @"at" : @([[NSDate date] timeIntervalSince1970]),
-                        @"r2" : r2,
-                        @"l2" : l2
-                    }];
-                    if (dsb.sentHistory.count > 40) {
-                        [dsb.sentHistory removeObjectAtIndex:0];
-                    }
-                    pthread_mutex_unlock(&dsb.outputLock);
-                }
-            }
-            usleep(16000);
-        }
-    }
-    atomic_store(&dsb.workerExited, true);
-    return NULL;
-}
-static bool setLevel(int ch, float level) {
-    level = fmaxf(0, fminf(1, level));
-    if (fabsf(lastLevel[ch] - level) < .001) {
-        return true;
-    }
-    if (dsb.dry) {
-        lastLevel[ch] = level;
-        return true;
-    }
-    if (!atomic_load(&engineRunning[ch])) {
-        return level == 0;
-    }
-    NSError *error = nil;
-    CHHapticDynamicParameter *p = [[CHHapticDynamicParameter alloc]
-        initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl
-                      value:level
-               relativeTime:0];
-    @try {
-        if (![players[ch] sendParameters:@[ p ] atTime:CHHapticTimeImmediate error:&error]) {
-            fprintf(stderr, "Core Haptics update failed: %s\n", error.description.UTF8String);
-            return false;
-        }
-    } @catch (NSException *exception) {
-        atomic_store(&engineRunning[ch], false);
-        fprintf(stderr, "Core Haptics became unavailable: %s\n", exception.reason.UTF8String);
-        return false;
-    }
-    lastLevel[ch] = level;
-    return true;
-}
-static bool prepare(GCController *pad) {
-    NSArray *localities = @[ GCHapticsLocalityLeftHandle, GCHapticsLocalityRightHandle ];
-    for (int i = 0; i < 2; i++) {
-        engines[i] = [pad.haptics createEngineWithLocality:localities[i]];
-        if (!engines[i]) {
-            fprintf(stderr, "No haptic engine locality=%s supported=%s\n",
-                    [localities[i] UTF8String],
-                    pad.haptics.supportedLocalities.description.UTF8String);
-            return false;
-        }
-        engines[i].autoShutdownEnabled = NO;
-        engines[i].stoppedHandler = ^(CHHapticEngineStoppedReason reason) {
-          atomic_store(&engineRunning[i], false);
-          fprintf(stderr, "Core Haptics stopped: %ld\n", (long)reason);
-          dsb.quitting = 1;
-        };
-        engines[i].resetHandler = ^{
-          atomic_store(&engineRunning[i], false);
-          fprintf(stderr, "Core Haptics reset; session must restart\n");
-          dsb.quitting = 1;
-        };
-        NSError *e = nil;
-        if (![engines[i] startAndReturnError:&e]) {
-            fprintf(stderr, "Engine start ch=%d error=%s\n", i, e.description.UTF8String);
-            return false;
-        }
-        atomic_store(&engineRunning[i], true);
-        CHHapticEventParameter *one = [[CHHapticEventParameter alloc]
-            initWithParameterID:CHHapticEventParameterIDHapticIntensity
-                          value:1];
-        CHHapticEvent *event =
-            [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous
-                                          parameters:@[ one ]
-                                        relativeTime:0
-                                            duration:30];
-        CHHapticDynamicParameter *zero = [[CHHapticDynamicParameter alloc]
-            initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl
-                          value:0
-                   relativeTime:0];
-        CHHapticPattern *pattern = [[CHHapticPattern alloc] initWithEvents:@[ event ]
-                                                                parameters:@[ zero ]
-                                                                     error:&e];
-        silentPattern = pattern;
-        players[i] = [engines[i] createPlayerWithPattern:pattern error:&e];
-        if (!players[i]) {
-            fprintf(stderr, "Player create ch=%d error=%s\n", i, e.description.UTF8String);
-            return false;
-        }
-
-        if (![players[i] startAtTime:CHHapticTimeImmediate error:&e]) {
-            fprintf(stderr, "Player start ch=%d error=%s\n", i, e.description.UTF8String);
-            return false;
-        }
-        lastLevel[i] = 0;
-    }
-    playerStart = CFAbsoluteTimeGetCurrent();
-    return true;
-}
-static bool renewPlayers(void) {
-    if (dsb.dry || CFAbsoluteTimeGetCurrent() - playerStart < 25) {
-        return true;
-    }
-    for (int i = 0; i < 2; i++) {
-        NSError *e = nil;
-        id<CHHapticPatternPlayer> next = [engines[i] createPlayerWithPattern:silentPattern
-                                                                       error:&e];
-        if (!next) {
-            return false;
-        }
-        [players[i] stopAtTime:CHHapticTimeImmediate error:NULL];
-        players[i] = next;
-        if (![next startAtTime:CHHapticTimeImmediate error:&e]) {
-            return false;
-        }
-        lastLevel[i] = -1;
-    }
-    playerStart = CFAbsoluteTimeGetCurrent();
-    return true;
-}
 typedef struct {
     uint32_t pid, sequence;
     double lastLevelAt, lastRumbleAt, lastPacketAt;
@@ -317,24 +45,15 @@ typedef struct {
 } Source;
 static Source sources[64];
 
-// Source state and metrics are owned by the session's main run loop.
-typedef struct {
-    uint64_t accepted, dropped, levels, outputs, envelopeUpdates;
-    float left, right, peakLeft, peakRight;
-} SessionMetrics;
-
 static bool validPayload(const DSBPacket *packet) {
     switch (packet->kind) {
     case DSB_LEVEL:
-        return true;
-    case DSB_PCM:
-        return dsb.pcmMode && (packet->report[0] == 0 || packet->report[0] == 30);
-    case DSB_OUTPUT:
-        return packet->report[0] == 2;
-    case DSB_INPUT:
-        return dsb.dry && packet->report[0] == 0x31;
     case DSB_MOTORS:
         return true;
+    case DSB_OUTPUT:
+    case DSB_PCM:
+    case DSB_INPUT:
+        return backend->accepts(packet);
     default:
         return false;
     }
@@ -383,58 +102,27 @@ static void receivePackets(int fd, const uint8_t token[16], double now, SessionM
             s->lastLevelAt = now;
             s->levelLeft = fmaxf(0, fminf(1, p.left));
             s->levelRight = fmaxf(0, fminf(1, p.right));
-            if (!dsb.pcmMode) {
+            if (!(abilities & DSB_CAN_AUDIO)) {
                 metrics->levels++;
             }
-        } else if (dsb.pcmMode && p.kind == DSB_PCM && (p.report[0] == 0 || p.report[0] == 30)) {
-            DSBPCMReceive(&p);
+        } else if (p.kind == DSB_PCM) {
+            backend->receive(&p, NULL);
             s->lastLevelAt = now;
             metrics->levels++;
-        } else if (p.kind == DSB_OUTPUT && p.report[0] == 2) {
-            const uint8_t *b = p.report + 1;
-            // What a game asks of the pad, even what is not acted on: each new
-            // combination of the valid flags (0, 1, 2) and the motor bytes, once.
-            {
-                static uint64_t seen[40];
-                static unsigned count;
-                uint64_t k = (uint64_t)b[0] | (uint64_t)b[1] << 8 | (uint64_t)b[38] << 16 |
-                             (uint64_t)b[2] << 24 | (uint64_t)b[3] << 32 | (uint64_t)p.pid << 40;
-                bool known = false;
-                for (unsigned i = 0; i < count; i++) {
-                    known |= seen[i] == k;
-                }
-                if (!known && count < 40) {
-                    seen[count++] = k;
-                    fprintf(stderr,
-                            "Output source=%u flags=%02x/%02x/%02x motors R=%u L=%u triggers R=%02x L=%02x\n",
-                            p.pid, b[0], b[1], b[38], b[2], b[3], b[10], b[21]);
-                }
-            }
-            if (b[1] & 4) {
-                if (!ledCommands || memcmp(ledRGB, b + 44, 3) || ledSource != p.pid) {
-                    fprintf(stderr, "LED source=%u rgb=%u,%u,%u flags=%02x/%02x\n", p.pid, b[44],
-                            b[45], b[46], b[0], b[1]);
-                }
-                ledCommands++;
-                ledSource = p.pid;
-                memcpy(ledRGB, b + 44, 3);
-            }
-            if (b[1] & 16) {
-                if (!playerCommands || playerLED != b[43]) {
-                    fprintf(stderr, "Player LED source=%u value=%02x flags=%02x/%02x\n", p.pid,
-                            b[43], b[0], b[1]);
-                }
-                playerCommands++;
-                playerLED = b[43];
-            }
-            queueOutput(p.report);
+        } else if (p.kind == DSB_OUTPUT) {
+            DSBGameOutput out = {0};
+            backend->receive(&p, &out);
             metrics->outputs++;
-            if ((b[0] & 3) || (b[38] & 4)) {
-                s->lastRumbleAt = now;
-                s->rumbleLeft = b[3] / 255.f;
-                s->rumbleRight = b[2] / 255.f;
+            for (int side = 0; side < 2; side++) {
+                if ((out.triggers & (1u << side)) && !session.quitting) {
+                    gameOwnsTrigger[side] = true;
+                }
             }
-            // LED/trigger-only transactions leave the last rumble intact.
+            if (out.motors) {
+                s->lastRumbleAt = now;
+                s->rumbleLeft = out.left;
+                s->rumbleRight = out.right;
+            }
         } else if (p.kind == DSB_MOTORS) {
             float left = fmaxf(0, fminf(1, p.left)), right = fmaxf(0, fminf(1, p.right));
             // Each new pair a source asks for, once, as the output log does.
@@ -458,7 +146,7 @@ static void receivePackets(int fd, const uint8_t token[16], double now, SessionM
             s->rumbleRight = right;
             metrics->outputs++;
         } else if (p.kind == DSB_INPUT) {
-            DSBNotePadInput(p.report, sizeof(p.report));
+            backend->receive(&p, NULL);
         } else {
             metrics->dropped++;
             continue;
@@ -476,10 +164,6 @@ static bool rumbleHeld(const Source *s, double now) {
            (now - s->lastRumbleAt < .5 || now - s->lastPacketAt < 2);
 }
 
-static bool moved(uint8_t value, uint8_t sent) {
-    return value != sent && (!value || abs((int)value - (int)sent) >= 4);
-}
-
 // A trigger set to rumble vibrates with the game's motor: R2 with the light
 // right motor, L2 with the heavy left one, in eight steps. A step changes at
 // most every 60 ms, so a game's rumble ramp costs a handful of control writes.
@@ -495,19 +179,7 @@ static void updateTriggerRumble(double now, uint8_t right, uint8_t left) {
         if (step == triggerRumbleStep[side] || now - triggerRumbleAt[side] < .06) {
             continue;
         }
-        uint8_t effect[11];
-        if (step) {
-            DSBTriggerVibration(2, DSBTriggerRumbleAmplitude(step, strength), DSB_TRIGGER_RUMBLE_HZ,
-                                effect);
-        } else {
-            memset(effect, 0, 11);
-            effect[0] = 5;
-        }
-        pthread_mutex_lock(&dsb.outputLock);
-        dsb.pending[0] |= 4u << side;
-        memcpy(dsb.pending + 10 + side * 11, effect, 11);
-        dsb.outputDirty = true;
-        pthread_mutex_unlock(&dsb.outputLock);
+        backend->trigger(side, DSB_TRIGGER_RUMBLE, DSBTriggerRumbleAmplitude(step, strength));
         triggerRumbleStep[side] = step;
         triggerRumbleAt[side] = now;
         triggerRumbleUpdates++;
@@ -516,164 +188,53 @@ static void updateTriggerRumble(double now, uint8_t right, uint8_t left) {
 
 // A side with an effect for while the other trigger is pressed
 // ("R2:resist@2,R2:weapon@8+L2"): it switches between its two effects as that
-// trigger is pressed and released, read from the pad's own input reports. No
-// effect is a released trigger. A rumble effect starts from still and the
-// rumble update moves it.
+// trigger is pressed and released, read from the pad's own input. No effect is
+// a released trigger. A rumble effect starts from still and the rumble update
+// moves it.
 static void updateTriggerWaits(void) {
     for (int side = 0; side < 2; side++) {
         if (!triggerChoice.when[side] || gameOwnsTrigger[side]) {
             continue;
         }
-        uint8_t other = atomic_load(&dsb.padTrigger[triggerChoice.when[side] - 1]);
+        uint8_t other = atomic_load(&session.padTrigger[triggerChoice.when[side] - 1]);
         bool held = DSBTriggerPressed(waitHeld[side], other);
         if (held == waitHeld[side]) {
             continue;
         }
         waitHeld[side] = held;
         triggerWaitChanges++;
-        uint8_t kind, strength, effect[11] = {5};
+        uint8_t kind, strength;
         DSBTriggerActive(&triggerChoice, side, held, &kind, &strength);
-        DSBTriggerPreset(kind, strength, effect);
+        backend->trigger(side, kind == DSB_TRIGGER_RUMBLE ? DSB_TRIGGER_NONE : kind, strength);
         triggerRumbleStep[side] = 0;
         triggerRumbleAt[side] = 0;
-        pthread_mutex_lock(&dsb.outputLock);
-        dsb.pending[0] |= 4u << side;
-        memcpy(dsb.pending + 10 + side * 11, effect, 11);
-        dsb.outputDirty = true;
-        pthread_mutex_unlock(&dsb.outputLock);
     }
 }
 
 static bool updateEffects(double now, float pcmGain, SessionMetrics *metrics) {
-    pthread_mutex_lock(&dsb.outputLock);
-    for (int side = 0; side < 2; side++) {
-        if (releaseAt[side] && now >= releaseAt[side]) {
-            dsb.pending[0] |= 4u << side;
-            memcpy(dsb.pending + 10 + side * 11, releaseEffect[side], 11);
-            releaseAt[side] = 0;
-            dsb.outputDirty = true;
-        }
-    }
-    pthread_mutex_unlock(&dsb.outputLock);
-    float l = 0, r = 0;
+    DSBMotorState motors = {0};
     for (int i = 0; i < 64; i++) {
         Source *s = sources + i;
-        if (!dsb.pcmMode && now - s->lastLevelAt < .15) {
-            l = fmaxf(l, DSBCalibratedPCM(s->levelLeft, pcmGain));
-            r = fmaxf(r, DSBCalibratedPCM(s->levelRight, pcmGain));
-        }
         if (rumbleHeld(s, now)) {
-            l = fmaxf(l, s->rumbleLeft);
-            r = fmaxf(r, s->rumbleRight);
+            motors.left = fmaxf(motors.left, s->rumbleLeft);
+            motors.right = fmaxf(motors.right, s->rumbleRight);
+        }
+        if (now - s->lastLevelAt < .15) {
+            motors.envelopeLeft = fmaxf(motors.envelopeLeft, s->levelLeft);
+            motors.envelopeRight = fmaxf(motors.envelopeRight, s->levelRight);
         }
     }
-    if (dsb.pcmMode) {
-        float a = 0, b = 0;
-        // While the link is too slow for PCM, the haptic audio would otherwise be
-        // dropped; its envelope drives the motors instead, as it does without PCM.
-        bool envelope = DSBPCMSuspended();
-        for (int i = 0; i < 64; i++) {
-            if (rumbleHeld(sources + i, now)) {
-                a = fmaxf(a, sources[i].rumbleLeft);
-                b = fmaxf(b, sources[i].rumbleRight);
-            }
-        }
-        if (dsb.rumbleHaptics) {
-            // Only the game's motor values: the envelope above is real haptic
-            // audio, which the writer already plays and must not be played twice.
-            // Under 4 of 255 is the motors path's deadband; it would only keep a
-            // stream of silence open here.
-            uint8_t sl = (uint8_t)lrintf(a * 255), sr = (uint8_t)lrintf(b * 255);
-            atomic_store(&dsb.synthLeft, sl < 4 ? 0 : sl);
-            atomic_store(&dsb.synthRight, sr < 4 ? 0 : sr);
-        }
-        updateTriggerWaits();
-        updateTriggerRumble(now, (uint8_t)lrintf(b * 255), (uint8_t)lrintf(a * 255));
-        for (int i = 0; i < 64; i++) {
-            if (envelope && now - sources[i].lastLevelAt < .15) {
-                float el = DSBCalibratedPCM(sources[i].levelLeft, pcmGain),
-                      er = DSBCalibratedPCM(sources[i].levelRight, pcmGain);
-                if (el > a || er > b) {
-                    metrics->envelopeUpdates++;
-                }
-                a = fmaxf(a, el);
-                b = fmaxf(b, er);
-            }
-        }
-        l = fmaxf(l, a);
-        r = fmaxf(r, b);
-        uint8_t left = (uint8_t)lrintf(a * 255), right = (uint8_t)lrintf(b * 255);
-        pthread_mutex_lock(&dsb.outputLock);
-        // A change under 4 of 255 is not felt but costs a Bluetooth write; the
-        // envelope moves on every audio buffer. Reaching zero always goes out.
-        if (moved(left, dsb.legacyLeft) || moved(right, dsb.legacyRight)) {
-            dsb.legacyLeft = left;
-            dsb.legacyRight = right;
-            dsb.legacyDirty = true;
-        }
-        pthread_mutex_unlock(&dsb.outputLock);
-    }
-    if (dsb.pcmMode) {
-        DSBPCMNotify();
-    }
-    if (!dsb.pcmMode) {
-        float a = 0, b = 0;
-        for (int i = 0; i < 64; i++) {
-            if (rumbleHeld(sources + i, now)) {
-                a = fmaxf(a, sources[i].rumbleLeft);
-                b = fmaxf(b, sources[i].rumbleRight);
-            }
-        }
-        updateTriggerRumble(now, (uint8_t)lrintf(b * 255), (uint8_t)lrintf(a * 255));
-    }
-    metrics->peakLeft = fmaxf(metrics->peakLeft, l);
-    metrics->peakRight = fmaxf(metrics->peakRight, r);
-    if (!dsb.pcmMode) {
-        if (!renewPlayers()) {
-            return false;
-        }
-        if (!setLevel(0, l) || !setLevel(1, r)) {
-            return false;
-        }
-    }
-
-    metrics->left = l;
-    metrics->right = r;
-    return true;
+    updateTriggerWaits();
+    updateTriggerRumble(now, (uint8_t)lrintf(motors.right * 255),
+                        (uint8_t)lrintf(motors.left * 255));
+    return backend->update(now, &motors, pcmGain, metrics);
 }
 
 static void writeStatus(NSString *status, unsigned port, float pcmGain,
                         const SessionMetrics *metrics) {
-    NSDictionary *pcmStats = DSBPCMSnapshot();
-    pthread_mutex_lock(&dsb.outputLock);
-    NSMutableArray *r2 = [NSMutableArray array], *l2 = [NSMutableArray array];
-    for (int i = 10; i < 21; i++) {
-        [r2 addObject:@(dsb.pending[i])];
-        [l2 addObject:@(dsb.pending[i + 11])];
-    }
-    NSDictionary *triggers = @{
-        @"resetGraceMs" : @(resetGrace * 1000),
-        @"suppressedR2Resets" : @(suppressedResets[0]),
-        @"suppressedL2Resets" : @(suppressedResets[1]),
-        @"r2" : r2,
-        @"l2" : l2,
-        @"updates" : @{@"r2" : @(triggerUpdates[0]), @"l2" : @(triggerUpdates[1])},
-        @"sentHistory" : [dsb.sentHistory copy],
-        @"physicalR2Mode" : @(dsb.pcmMode ? -1 : nativePad.rightTrigger.mode),
-        @"physicalR2Status" : @(dsb.pcmMode ? -1 : nativePad.rightTrigger.status)
-    };
-    pthread_mutex_unlock(&dsb.outputLock);
-    NSDictionary *obj = @{
+    NSMutableDictionary *obj = [@{
         @"state" : @"running",
-        @"led" : @{
-            @"commands" : @(ledCommands),
-            @"sourcePid" : @(ledSource),
-            @"rgb" : @[ @(ledRGB[0]), @(ledRGB[1]), @(ledRGB[2]) ],
-            @"playerCommands" : @(playerCommands),
-            @"player" : @(playerLED)
-        },
-        @"pcm" : pcmStats,
-        @"triggers" : triggers,
+        @"backend" : @(backend->name),
         @"pid" : @(getpid()),
         @"port" : @(port),
         @"accepted" : @(metrics->accepted),
@@ -681,30 +242,29 @@ static void writeStatus(NSString *status, unsigned port, float pcmGain,
         @"pcmBlocks" : @(metrics->levels),
         @"envelopeUpdates" : @(metrics->envelopeUpdates),
         @"pcmGain" : @(pcmGain),
-        @"rumbleHaptics" : @(dsb.rumbleHaptics),
+        @"rumbleHaptics" : @(session.rumbleHaptics),
         @"triggerSpec" : triggerSpec ? @(triggerSpec) : [NSNull null],
         @"triggerRumbleUpdates" : @(triggerRumbleUpdates),
         @"gameOwnsTriggers" : @[ @(gameOwnsTrigger[0]), @(gameOwnsTrigger[1]) ],
         @"triggerWaits" : @[
-            triggerChoice.when[0] ? @"L2" : [NSNull null], triggerChoice.when[1] ? @"R2" : [NSNull null]
+            triggerChoice.when[0] ? @"L2" : [NSNull null],
+            triggerChoice.when[1] ? @"R2" : [NSNull null]
         ],
         @"triggerWaitHeld" : @[ @(waitHeld[0]), @(waitHeld[1]) ],
         @"triggerWaitChanges" : @(triggerWaitChanges),
         @"padTriggers" : @{
-            @"r2" : @(atomic_load(&dsb.padTrigger[0])),
-            @"l2" : @(atomic_load(&dsb.padTrigger[1])),
-            @"reports" : @(atomic_load(&dsb.padTriggerReports))
+            @"r2" : @(atomic_load(&session.padTrigger[0])),
+            @"l2" : @(atomic_load(&session.padTrigger[1])),
+            @"reports" : @(atomic_load(&session.padTriggerReports))
         },
         @"outputCommands" : @(metrics->outputs),
-        @"hidReports" : @(atomic_load(&dsb.reports)),
-        @"hidErrors" : @(atomic_load(&dsb.errors)),
-        @"hidStalled" : @(atomic_load(&dsb.stalled)),
         @"left" : @(metrics->left),
         @"right" : @(metrics->right),
         @"peakLeft" : @(metrics->peakLeft),
         @"peakRight" : @(metrics->peakRight),
         @"updated" : @([[NSDate date] timeIntervalSince1970])
-    };
+    } mutableCopy];
+    backend->status(obj);
     [[NSJSONSerialization dataWithJSONObject:obj options:NSJSONWritingPrettyPrinted
                                        error:NULL] writeToFile:status atomically:YES];
 }
@@ -721,24 +281,15 @@ static bool parseArguments(int argc, char **argv, BrokerOptions *options) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--probe")) {
             options->probe = true;
-        } else if (!strcmp(argv[i], "--pcm")) {
-            dsb.pcmMode = true;
-        } else if (!strcmp(argv[i], "--trigger-reset-grace-ms") && i + 1 < argc) {
-            char *end = NULL;
-            long ms = strtol(argv[++i], &end, 10);
-            if (end == argv[i] || *end || ms < 0 || ms > 100) {
-                return false;
-            }
-            resetGrace = ms / 1000.;
         } else if (!strcmp(argv[i], "--rumble-haptics")) {
-            dsb.rumbleHaptics = true;
+            session.rumbleHaptics = true;
         } else if (!strcmp(argv[i], "--triggers") && i + 1 < argc) {
             if (!DSBParseTriggers(argv[++i], &triggerChoice)) {
                 return false;
             }
             triggerSpec = argv[i];
         } else if (!strcmp(argv[i], "--dry-run")) {
-            dsb.dry = true;
+            session.dry = true;
         } else if (!strcmp(argv[i], "--token") && i + 1 < argc) {
             options->secret = @(argv[++i]);
         } else if (!strcmp(argv[i], "--status") && i + 1 < argc) {
@@ -763,120 +314,55 @@ static bool parseArguments(int argc, char **argv, BrokerOptions *options) {
                 return false;
             }
             options->requestedPort = (unsigned)p;
-        } else {
+        } else if (!backend->argument(argc, argv, &i)) {
             return false;
         }
     }
     return true;
 }
 
-static int openController(bool probe, IOHIDManagerRef *owner) {
-    if (dsb.dry) {
-        if (probe) {
-            puts("{\"bluetooth\":0,\"usb\":0,\"eligible\":false}");
-        }
-        return 0;
+// The options the pad cannot honour are declined here, each with a log line,
+// and the fixed trigger effects go out before the session reports ready.
+static void applyTitleOptions(void) {
+    if (session.rumbleHaptics && !(abilities & DSB_CAN_HAPTICS)) {
+        session.rumbleHaptics = false;
+        fprintf(stderr, "Rumble haptics need the PCM transport; motors only\n");
     }
-    IOHIDManagerRef manager = NULL;
-    unsigned bt = 0, usb = 0;
-    manager = IOHIDManagerCreate(NULL, dsb.pcmMode ? kIOHIDManagerOptionIndependentDevices : 0);
-    *owner = manager;
-    if (!manager) {
-        return 4;
+    if (!triggerSpec) {
+        return;
     }
-    // Both DualSense models: the standard pad (0ce6) and the Edge (0df2).
-    IOHIDManagerSetDeviceMatchingMultiple(
-        manager, (__bridge CFArrayRef) @[
-            @{@kIOHIDVendorIDKey : @0x54c, @kIOHIDProductIDKey : @0xce6},
-            @{@kIOHIDVendorIDKey : @0x54c, @kIOHIDProductIDKey : @0xdf2}
-        ]);
-    if (IOHIDManagerOpen(manager, 0)) {
-        return 4;
-    }
-    CFSetRef devices = IOHIDManagerCopyDevices(manager);
-    if (devices) {
-        for (id obj in (__bridge NSSet *)devices) {
-            IOHIDDeviceRef d = (__bridge IOHIDDeviceRef)obj;
-            NSString *transport =
-                (__bridge NSString *)IOHIDDeviceGetProperty(d, CFSTR(kIOHIDTransportKey));
-            if ([transport isEqualToString:@"USB"]) {
-                usb++;
-            } else if ([transport hasPrefix:@"Bluetooth"]) {
-                bt++;
-                dsb.hid = d;
-                NSNumber *product =
-                    (__bridge NSNumber *)IOHIDDeviceGetProperty(d, CFSTR(kIOHIDProductIDKey));
-                dsb.product = product ? product.unsignedShortValue : 0xce6;
-            }
-        }
-        if (dsb.hid) {
-            CFRetain(dsb.hid);
-        }
-        CFRelease(devices);
-    }
-    if (probe) {
-        printf("{\"bluetooth\":%u,\"usb\":%u,\"eligible\":%s,\"product\":\"%04x\"}\n", bt,
-               usb, bt == 1 && !usb ? "true" : "false", bt == 1 ? dsb.product : 0);
-        return 0;
-    }
-    if (bt != 1 || usb) {
-        fprintf(stderr, "Requires exactly one Bluetooth DualSense and no USB DualSense\n");
-        return 3;
-    }
-    if (IOHIDDeviceOpen(dsb.hid, 0)) {
-        return 4;
-    }
-    [NSApplication sharedApplication];
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
-    GCController *pad = nil;
-    // The raw PCM transport owns HID output. Do not also create a native
-    // controller/haptic client: its initialization and teardown can write
-    // competing mode/LED commands. Core Haptics is an explicit fallback only.
-    if (!dsb.pcmMode) {
-        GCController.shouldMonitorBackgroundEvents = YES;
-        for (int i = 0; i < 80 && !pad; i++) {
-            for (GCController *c in GCController.controllers) {
-                if ([c.extendedGamepad isKindOfClass:GCDualSenseGamepad.class]) {
-                    pad = c;
-                    break;
-                }
-            }
-            if (!pad) {
-                [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
-            }
-        }
-        nativePad = (GCDualSenseGamepad *)pad.extendedGamepad;
-        if (!pad || !prepare(pad)) {
-            fprintf(stderr, "DualSense Core Haptics initialization failed\n");
-            return 5;
+    static const char *const kindNames[] = {"untouched", "light",   "medium",
+                                            "strong",    "weapon",  "slope",
+                                            "vibrate",   "rumble",  "resist"};
+    static const char *const sideNames[] = {"R2", "L2"};
+    for (int side = 0; side < 2; side++) {
+        if (triggerChoice.when[side] && !(abilities & DSB_CAN_READ_TRIGGERS)) {
+            // Only a pad whose input the backend reads can say when to switch.
+            fprintf(stderr,
+                    "Trigger waits need the PCM transport; %s keeps only its first effect\n",
+                    sideNames[side]);
+            triggerChoice.when[side] = triggerChoice.held[side] = 0;
+            triggerChoice.heldStrength[side] = 0;
         }
     }
-    if (dsb.pcmMode) {
-        if (!DSBPCMStartInput()) {
-            return 8;
+    // Fixed effects go out now; a rumble side follows the motors. The game's own
+    // trigger writes replace either as they arrive, and the session's cleanup
+    // releases them like any trigger it set.
+    for (int side = 0; side < 2; side++) {
+        uint8_t kind = triggerChoice.kind[side];
+        if (kind != DSB_TRIGGER_NONE && kind != DSB_TRIGGER_RUMBLE) {
+            backend->trigger(side, kind, triggerChoice.strength[side]);
         }
     }
-    if (!dsb.pcmMode) {
-        [[NSNotificationCenter defaultCenter]
-            addObserverForName:GCControllerDidDisconnectNotification
-                        object:pad
-                         queue:NSOperationQueue.mainQueue
-                    usingBlock:^(NSNotification *n) {
-                      fprintf(stderr, "Core Haptics controller disconnected\n");
-                      dsb.quitting = 1;
-                    }];
-    }
-
-    return 0;
-}
-
-// Scope cleanup covers probe and every startup failure before the event loop.
-// A stalled driver call is the exception: the process exits without touching
-// that IOKit connection again, since closing it could block on the same driver.
-static void releaseControllerManager(IOHIDManagerRef *manager) {
-    if (*manager && !atomic_load(&dsb.stalled)) {
-        IOHIDManagerClose(*manager, 0);
-        CFRelease(*manager);
+    for (int side = 0; side < 2; side++) {
+        fprintf(stderr, "Triggers %s: %s %s (strength %u)", triggerSpec, sideNames[side],
+                kindNames[triggerChoice.kind[side]], triggerChoice.strength[side]);
+        if (triggerChoice.when[side]) {
+            fprintf(stderr, ", %s (strength %u) while %s is pressed",
+                    kindNames[triggerChoice.held[side]], triggerChoice.heldStrength[side],
+                    sideNames[1 - side]);
+        }
+        fputc('\n', stderr);
     }
 }
 
@@ -886,7 +372,6 @@ int main(int argc, char **argv) {
             beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical
                               reason:@"DualSense real-time haptic transport"];
         setbuf(stdout, NULL);
-        dsb.sentHistory = [NSMutableArray array];
         signal(SIGTERM, stopSignal);
         signal(SIGINT, stopSignal);
         BrokerOptions options = {0};
@@ -896,22 +381,12 @@ int main(int argc, char **argv) {
             return 64;
         }
         NSString *status = options.status;
-        IOHIDManagerRef manager __attribute__((cleanup(releaseControllerManager))) = NULL;
-        int controllerResult = openController(options.probe, &manager);
+        int controllerResult = backend->open(options.probe);
         if (controllerResult || options.probe) {
-            if (dsb.hid) {
-                CFRelease(dsb.hid);
-                dsb.hid = NULL;
-            }
             return controllerResult;
         }
-        if (dsb.pcmMode) {
-            task_category_policy_data_t policy = {TASK_FOREGROUND_APPLICATION};
-            kern_return_t result =
-                task_policy_set(mach_task_self(), TASK_CATEGORY_POLICY, (task_policy_t)&policy,
-                                TASK_CATEGORY_POLICY_COUNT);
-            fprintf(stderr, "PCM task scheduling role result=%d\n", result);
-        }
+        abilities = backend->abilities();
+        bool realTime = backend->realTime();
         int fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (fd < 0) {
             return 6;
@@ -930,7 +405,7 @@ int main(int argc, char **argv) {
         unsigned port = ntohs(addr.sin_port);
         CFFileDescriptorRef socketEvents = NULL;
         CFRunLoopSourceRef socketSource = NULL;
-        if (dsb.pcmMode) {
+        if (realTime) {
             socketEvents = CFFileDescriptorCreate(NULL, fd, false, socketReady, NULL);
             if (!socketEvents) {
                 fprintf(stderr, "PCM socket event source unavailable\n");
@@ -943,74 +418,9 @@ int main(int argc, char **argv) {
             }
             CFRunLoopAddSource(CFRunLoopGetMain(), socketSource, kCFRunLoopDefaultMode);
         }
-        pthread_t worker;
-        atomic_store(&dsb.workerRunning, true);
-        if (pthread_create(&worker, NULL, dsb.pcmMode ? DSBPCMWorker : outputWorker, NULL)) {
-            fprintf(stderr, "Controller writer thread unavailable\n");
+        applyTitleOptions();
+        if (!backend->start()) {
             return 9;
-        }
-        if (dsb.pcmMode) {
-            double deadline = CFAbsoluteTimeGetCurrent() + 5;
-            while (!DSBPCMWorkerIsReady() && CFAbsoluteTimeGetCurrent() < deadline) {
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, .002, true);
-            }
-            if (!DSBPCMWorkerIsReady() || atomic_load(&dsb.stalled)) {
-                fprintf(stderr, "PCM writer did not initialize\n");
-                atomic_store(&dsb.workerRunning, false);
-                atomic_store(&dsb.stalled, true);
-                return 9;
-            }
-        }
-        if (dsb.rumbleHaptics && !dsb.pcmMode) {
-            // Without the PCM writer there are no voice coils to render on.
-            dsb.rumbleHaptics = false;
-            fprintf(stderr, "Rumble haptics need the PCM transport; motors only\n");
-        } else if (dsb.rumbleHaptics) {
-            fprintf(stderr, "Rumble haptics: motor values play on the voice coils "
-                            "(%.0f/%.0f Hz) while no haptic audio plays\n",
-                    DSB_RUMBLE_LOW_HZ, DSB_RUMBLE_HIGH_HZ);
-        }
-        if (triggerSpec) {
-            // Fixed effects go out now; a rumble side follows the motors. The
-            // game's own trigger writes replace either as they arrive, and the
-            // session's cleanup releases them like any trigger it set.
-            static const char *const kindNames[] = {"untouched", "light",   "medium",
-                                                    "strong",    "weapon",  "slope",
-                                                    "vibrate",   "rumble",  "resist"};
-            static const char *const sideNames[] = {"R2", "L2"};
-            for (int side = 0; side < 2; side++) {
-                if (triggerChoice.when[side] && !dsb.pcmMode) {
-                    // Only the PCM transport reads the pad's input reports.
-                    fprintf(stderr,
-                            "Trigger waits need the PCM transport; %s keeps only its first effect\n",
-                            sideNames[side]);
-                    triggerChoice.when[side] = triggerChoice.held[side] = 0;
-                    triggerChoice.heldStrength[side] = 0;
-                }
-            }
-            pthread_mutex_lock(&dsb.outputLock);
-            for (int side = 0; side < 2; side++) {
-                uint8_t effect[11];
-                if (DSBTriggerPreset(triggerChoice.kind[side], triggerChoice.strength[side], effect)) {
-                    dsb.pending[0] |= 4u << side;
-                    memcpy(dsb.pending + 10 + side * 11, effect, 11);
-                    dsb.outputDirty = true;
-                }
-            }
-            pthread_mutex_unlock(&dsb.outputLock);
-            if (dsb.pcmMode) {
-                DSBPCMNotify();
-            }
-            for (int side = 0; side < 2; side++) {
-                fprintf(stderr, "Triggers %s: %s %s (strength %u)", triggerSpec, sideNames[side],
-                        kindNames[triggerChoice.kind[side]], triggerChoice.strength[side]);
-                if (triggerChoice.when[side]) {
-                    fprintf(stderr, ", %s (strength %u) while %s is pressed",
-                            kindNames[triggerChoice.held[side]], triggerChoice.heldStrength[side],
-                            sideNames[1 - side]);
-                }
-                fputc('\n', stderr);
-            }
         }
         printf("{\"ready\":true,\"port\":%u,\"pid\":%d}\n", port, getpid());
         NSString *calibrationPath = [NSHomeDirectory()
@@ -1020,14 +430,14 @@ int main(int argc, char **argv) {
         double nextCalibration = 0;
         double start = CFAbsoluteTimeGetCurrent(), nextStatus = 0;
         SessionMetrics metrics = {0};
-        while (!dsb.quitting &&
+        while (!session.quitting &&
                (!options.seconds || CFAbsoluteTimeGetCurrent() - start < options.seconds)) {
             @autoreleasepool {
                 double now = CFAbsoluteTimeGetCurrent();
                 if (options.parent && kill(options.parent, 0) && errno == ESRCH) {
                     break;
                 }
-                if (DSBOutputWriteTimedOut() || atomic_load(&dsb.stalled)) {
+                if (backend->failed()) {
                     break;
                 }
                 if (now >= nextCalibration) {
@@ -1042,7 +452,7 @@ int main(int argc, char **argv) {
                     writeStatus(status, port, pcmGain, &metrics);
                     nextStatus = now + 1;
                 }
-                if (dsb.pcmMode) {
+                if (realTime) {
                     CFFileDescriptorEnableCallBacks(socketEvents, kCFFileDescriptorReadCallBack);
                     CFRunLoopRunInMode(kCFRunLoopDefaultMode, .002, true);
                 } else {
@@ -1051,59 +461,8 @@ int main(int argc, char **argv) {
                 }
             }
         }
-        if (!dsb.pcmMode) {
-            setLevel(0, 0);
-            setLevel(1, 0);
-        }
-        // Release triggers only if this session touched them. Leave unrelated Steam output alone.
-        resetGrace = 0; // Cleanup must never defer release.
-        if (!atomic_load(&dsb.stalled) && !atomic_load(&dsb.deviceRemoved) &&
-            (dsb.pending[0] & 12)) {
-            uint8_t reset[64];
-            DSBTriggerRelease(dsb.pending[0], reset);
-            queueOutput(reset);
-            double deadline = CFAbsoluteTimeGetCurrent() + .25;
-            while (!atomic_load(&dsb.stalled) && CFAbsoluteTimeGetCurrent() < deadline) {
-                uint8_t unsent[47];
-                pthread_mutex_lock(&dsb.outputLock);
-                bool pending = DSBControlDelta(dsb.pending, dsb.lastSent, dsb.haveLast, unsent);
-                pthread_mutex_unlock(&dsb.outputLock);
-                if (!pending || DSBOutputWriteTimedOut()) {
-                    break;
-                }
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, .002, true);
-            }
-        }
-        atomic_store(&dsb.workerRunning, false);
-        while (!atomic_load(&dsb.workerExited) && !atomic_load(&dsb.stalled)) {
-            DSBOutputWriteTimedOut();
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, .002, true);
-        }
-        if (atomic_load(&dsb.workerExited)) {
-            pthread_join(worker, NULL);
-        }
-        for (int i = 0; i < 2; i++) {
-            // Disconnect can stop the engine before cleanup. PatternPlayer stop then
-            // raises an ObjC exception rather than returning NSError on macOS 27.
-            @try {
-                if (atomic_load(&engineRunning[i])) {
-                    [players[i] stopAtTime:CHHapticTimeImmediate error:NULL];
-                }
-                [engines[i] stopWithCompletionHandler:nil];
-            } @catch (NSException *exception) {
-                fprintf(stderr, "Core Haptics already stopped during cleanup: %s\n",
-                        exception.reason.UTF8String);
-            }
-            atomic_store(&engineRunning[i], false);
-        }
-        if (dsb.hid && !atomic_load(&dsb.stalled)) {
-            if (dsb.pcmMode) {
-                IOHIDDeviceUnscheduleFromRunLoop(dsb.hid, CFRunLoopGetMain(),
-                                                 kCFRunLoopCommonModes);
-            }
-            IOHIDDeviceClose(dsb.hid, 0);
-            CFRelease(dsb.hid);
-        }
+        NSString *finalState = @"stopped";
+        int exitStatus = backend->stop(&finalState);
         [[NSProcessInfo processInfo] endActivity:activity];
         if (status) {
             writeStatus(status, port, pcmGain, &metrics);
@@ -1116,9 +475,7 @@ int main(int argc, char **argv) {
             if (!final) {
                 final = [NSMutableDictionary dictionary];
             }
-            final[@"state"] = atomic_load(&dsb.deviceRemoved) ? @"disconnected"
-                              : atomic_load(&dsb.stalled)     ? @"output-stopped"
-                                                              : @"stopped";
+            final[@"state"] = finalState;
             final[@"updated"] = @([[NSDate date] timeIntervalSince1970]);
             [[NSJSONSerialization dataWithJSONObject:final
                                              options:NSJSONWritingPrettyPrinted
@@ -1131,9 +488,10 @@ int main(int argc, char **argv) {
             CFRelease(socketEvents);
         }
         close(fd);
+        unsigned writes = 0, errors = 0;
+        backend->counters(&writes, &errors);
         fprintf(stderr, "Stopped: packets=%llu PCM=%llu output=%llu HID=%u errors=%u\n",
-                metrics.accepted, metrics.levels, metrics.outputs, atomic_load(&dsb.reports),
-                atomic_load(&dsb.errors));
-        return atomic_load(&dsb.deviceRemoved) ? 10 : atomic_load(&dsb.stalled) ? 11 : 0;
+                metrics.accepted, metrics.levels, metrics.outputs, writes, errors);
+        return exitStatus;
     }
 }

@@ -97,7 +97,7 @@ static double monotonicNow(void) {
 static void pcmRemoved(void *ctx, IOReturn result, void *sender) {
     atomic_store(&dsb.deviceRemoved, true);
     atomic_store(&dsb.stalled, true);
-    dsb.quitting = 1;
+    session.quitting = 1;
     fprintf(stderr, "PCM device removed; waiting for a fresh Bluetooth connection\n");
 }
 static void pcmInput(void *ctx, IOReturn r, void *sender, IOHIDReportType type, uint32_t id,
@@ -122,7 +122,7 @@ static void pcmInput(void *ctx, IOReturn r, void *sender, IOHIDReportType type, 
     }
 }
 static bool inputAlive(void) {
-    return dsb.dry || (atomic_load(&inputReports) >= 10 &&
+    return session.dry || (atomic_load(&inputReports) >= 10 &&
                        monotonicNow() - atomic_load(&inputTime) / 1e9 < .2);
 }
 void DSBPCMReceive(const DSBPacket *p) {
@@ -206,7 +206,7 @@ void *DSBPCMWorker(void *unused) {
     @autoreleasepool {
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
         mach_timebase_info(&pcmTimebase);
-        pcmDeferTestTimers = dsb.dry && getenv("DSB_TEST_DEFER_TIMERS") != NULL;
+        pcmDeferTestTimers = session.dry && getenv("DSB_TEST_DEFER_TIMERS") != NULL;
         kern_return_t semResult = semaphore_create(mach_task_self(), &pcmWake, SYNC_POLICY_FIFO, 0);
         if (semResult) {
             fprintf(stderr, "PCM wake semaphore failed: %d\n", semResult);
@@ -251,7 +251,7 @@ void *DSBPCMWorker(void *unused) {
                     pcmWait(.002);
                     continue;
                 }
-                bool linkFast = dsb.dry || atomic_load(&inputHz) >= 100;
+                bool linkFast = session.dry || atomic_load(&inputHz) >= 100;
                 atomic_store(&pcmSuspended, !linkFast || now < resumeAfter);
                 if (streaming && atomic_load(&pcmSuspended)) {
                     int8_t zero[128] = {0};
@@ -290,11 +290,11 @@ void *DSBPCMWorker(void *unused) {
                 // value, as real audio does, so a rumble that pulses does not reopen it.
                 float synthLeft = atomic_load(&dsb.synthLeft) / 255.f,
                       synthRight = atomic_load(&dsb.synthRight) / 255.f;
-                if (dsb.rumbleHaptics && !atomic_load(&pcmSuspended) && !realAudio &&
+                if (session.rumbleHaptics && !atomic_load(&pcmSuspended) && !realAudio &&
                     (synthLeft > 0 || synthRight > 0)) {
                     synthNonzero = now;
                 }
-                bool synth = dsb.rumbleHaptics && !realAudio && !atomic_load(&pcmSuspended) &&
+                bool synth = session.rumbleHaptics && !realAudio && !atomic_load(&pcmSuspended) &&
                              synthNonzero > 0 && now - synthNonzero < .15;
                 if (!synth) {
                     rumbleSynth.level[0] = rumbleSynth.level[1] = 0;
