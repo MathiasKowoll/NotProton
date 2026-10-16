@@ -151,9 +151,16 @@ int main(void) {
     assert(DSBTriggerPreset(DSB_TRIGGER_RESIST, 7, preset));
     DSBTriggerFeedback(3, 7, expected);
     assert(!memcmp(preset, expected, 11));
-    assert(DSBTriggerPreset(DSB_TRIGGER_MEDIUM, 0, preset));
-    DSBTriggerFeedback(3, 4, expected);
-    assert(!memcmp(preset, expected, 11));
+    // The older names are resist at 2, 4 and 6, byte for byte, as the panel writes them.
+    {
+        const struct { int kind; uint8_t strength; } legacy[] = {
+            {DSB_TRIGGER_LIGHT, 2}, {DSB_TRIGGER_MEDIUM, 4}, {DSB_TRIGGER_STRONG, 6}};
+        for (unsigned i = 0; i < sizeof(legacy) / sizeof(legacy[0]); i++) {
+            assert(DSBTriggerPreset(legacy[i].kind, 0, preset));
+            assert(DSBTriggerPreset(DSB_TRIGGER_RESIST, legacy[i].strength, expected));
+            assert(!memcmp(preset, expected, 11));
+        }
+    }
     assert(DSBTriggerPreset(DSB_TRIGGER_SLOPE, 0, preset) && preset[0] == 0x21);
     DSBTriggerZones(slope, expected);
     assert(!memcmp(preset, expected, 11)); // the default slope is 1..8, checked above

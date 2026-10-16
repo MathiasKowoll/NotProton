@@ -124,14 +124,18 @@ static inline void DSBTriggerVibration(uint8_t position, uint8_t amplitude, uint
 // tune by feel.
 static inline bool DSBTriggerPreset(uint8_t kind, uint8_t strength, uint8_t out[11]) {
     switch (kind) {
+    // light, medium and strong are resist at 2, 4 and 6, as the panel, the
+    // grammar's comment and per-title-feedback.md say. light used to start at
+    // zone 4 and strong at zone 2, so the panel's rewrite of either moved where
+    // the resistance began.
     case DSB_TRIGGER_LIGHT:
-        DSBTriggerFeedback(4, strength ? strength : 2, out);
+        DSBTriggerFeedback(3, strength ? strength : 2, out);
         return true;
     case DSB_TRIGGER_MEDIUM:
         DSBTriggerFeedback(3, strength ? strength : 4, out);
         return true;
     case DSB_TRIGGER_STRONG:
-        DSBTriggerFeedback(2, strength ? strength : 6, out);
+        DSBTriggerFeedback(3, strength ? strength : 6, out);
         return true;
     case DSB_TRIGGER_RESIST:
         DSBTriggerFeedback(3, strength ? strength : 4, out);
