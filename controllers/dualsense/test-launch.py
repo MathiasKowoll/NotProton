@@ -59,11 +59,14 @@ while True:
     child.write_text(
         """import json
 import os
+import signal
 import sys
 import time
 
 keys = ('DSB_RAW', 'DSB_PCM', 'DSB_LIBRARY', 'DSB_SESSION', 'DSB_DEVICE', 'DSB_VENDOR', 'DSB_PRODUCT')
-print(json.dumps({k: os.environ.get(k) for k in keys}), flush=True)
+observed = {k: os.environ.get(k) for k in keys}
+observed['TERM'] = signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+print(json.dumps(observed), flush=True)
 time.sleep(float(os.environ.get('TEST_CHILD_SLEEP', '0')))
 sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
 """
@@ -82,6 +85,7 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
         assert result.returncode == 0, (route, result.stderr)
         observed = json.loads(result.stdout.splitlines()[-1])
         assert observed["DSB_SESSION"] == "1"
+        assert observed["TERM"], (route, "the game's process starts with SIGTERM ignored")
         if route == "pcm":
             assert observed["DSB_RAW"] == "1:pcm" and observed["DSB_PCM"] == "1", observed
             assert observed["DSB_LIBRARY"] == str(root / "bridge.dylib")
@@ -187,7 +191,11 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
     assert result.returncode == 0, result.stderr
     assert not (root / "sessions/999999.json").exists()
     assert json.loads((root / "sessions/999999-status.json").read_text())["route"] == "broker-failed"
-    assert json.loads(result.stdout.splitlines()[-1])["DSB_LIBRARY"] is None
+    observed = json.loads(result.stdout.splitlines()[-1])
+    assert observed["DSB_LIBRARY"] is None
+    # The run script it becomes must be able to trap TERM, or Exit Game in Steam
+    # stops nothing.
+    assert observed["TERM"], "SIGTERM still ignored after the broker-failed bypass"
     print("  ok    child exit status and failed initialization cleanup", flush=True)
 
     resumed = subprocess.Popen(

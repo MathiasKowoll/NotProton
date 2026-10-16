@@ -74,6 +74,10 @@ func execute(_ command: [String], environment: [String: String]) throws -> Never
         unsetenv(key)
     }
     for (key, value) in environment { setenv(key, value, 1) }
+    // A signal ignored across exec stays ignored, and a shell cannot trap one
+    // that was ignored when it started: the run script's TERM trap, which is
+    // how Steam's Exit Game reaches the game, would never fire.
+    for value in [SIGTERM, SIGINT, SIGHUP] { signal(value, SIG_DFL) }
     let arguments = command.map { strdup($0) } + [nil]
     defer { arguments.forEach { free($0) } }
     arguments.withUnsafeBufferPointer { _ = execvp(command[0], $0.baseAddress!) }
@@ -291,6 +295,9 @@ func main() throws -> Int32 {
     let port: Int
     do { port = try startBroker() } catch {
         stop(broker)
+        // Its pipe would otherwise stay open in the run script and in Wine.
+        try? brokerPipe?.fileHandleForReading.close()
+        try? brokerPipe?.fileHandleForWriting.close()
         fputs("DualSense launch: \(error); starting without the bridge\n", stderr)
         try bypass("broker-failed")
     }
