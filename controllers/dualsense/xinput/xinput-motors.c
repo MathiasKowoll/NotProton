@@ -197,6 +197,17 @@ static void send_motors_locked(BYTE left, BYTE right)
 
 /* The broker holds a source's motors while it hears from it within two
  * seconds; a game that sets a value once and leaves it is kept alive here. */
+/* Keeps this DLL loaded for the life of the process. A title (or SDL) that loads
+ * XInput on demand frees it again, and the threads below would then run in
+ * unmapped code. Called from an API call's first use, never from DllMain. */
+static void pin_self(void)
+{
+    HMODULE self;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                            (LPCWSTR)(void *)pin_self, &self))
+        logf_("could not pin this DLL (error %lu); it must not be unloaded", GetLastError());
+}
+
 static DWORD WINAPI keepalive(void *unused)
 {
     for (;;)
@@ -254,6 +265,7 @@ static BOOL CALLBACK init_broker(INIT_ONCE *o, void *param, void **ctx)
         }
     }
     broker = TRUE;
+    pin_self();
     CloseHandle(CreateThread(NULL, 0, keepalive, NULL, 0, NULL));
     logf_("broker session on port %ld, source %08x%s", portnum, source,
           steam_pad ? "; Steam Input pad vibration goes to the bridged pad" : "");
@@ -496,6 +508,7 @@ static BOOL CALLBACK init_pad(INIT_ONCE *o, void *param, void **ctx)
         HANDLE h = open_pad();
         if (h != INVALID_HANDLE_VALUE) pad_connected = 1;
         pad_enabled = TRUE;
+        pin_self();
         CloseHandle(CreateThread(NULL, 0, pad_reader, h != INVALID_HANDLE_VALUE ? h : NULL, 0, NULL));
     }
     logf_("pad as XInput: on, slot %d, %ls", pad_index, pad_want);

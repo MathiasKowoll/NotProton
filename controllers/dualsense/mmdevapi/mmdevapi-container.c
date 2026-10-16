@@ -260,6 +260,17 @@ static void watch_clients(IMMDevice *device);
 
 /* Every endpoint's property store shares wine's one vtable: patch it once,
  * through a store opened on any endpoint. */
+/* Keeps this DLL loaded for the life of the process: the property stores and
+ * clients patched below point into it. Called from the first use of the
+ * enumerator, never from DllMain. */
+static void pin_self(void)
+{
+    HMODULE self;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                            (LPCWSTR)(void *)pin_self, &self))
+        logf_("could not pin this DLL (error %lu); it must not be unloaded", GetLastError());
+}
+
 static BOOL CALLBACK install(INIT_ONCE *once, void *param, void **ctx)
 {
     IClassFactory *factory = NULL;
@@ -273,6 +284,7 @@ static BOOL CALLBACK install(INIT_ONCE *once, void *param, void **ctx)
 
     InitializeCriticalSection(&lock);
     if (!GetEnvironmentVariableA("DSB_PORT", port, sizeof(port))) return TRUE;
+    pin_self();
     if (FAILED(hr = real_DllGetClassObject(&CLSID_MMDeviceEnumerator, &IID_IClassFactory, (void **)&factory)))
     {
         logf_("no device enumerator class (0x%08lx)", hr);
