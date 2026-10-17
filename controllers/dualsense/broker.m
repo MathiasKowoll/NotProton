@@ -284,7 +284,7 @@ typedef struct {
     NSString *status, *secret;
     pid_t parent;
     double seconds;
-    bool probe;
+    bool probe, wait;
     unsigned requestedPort;
 } BrokerOptions;
 
@@ -292,6 +292,8 @@ static bool parseArguments(int argc, char **argv, BrokerOptions *options) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--probe")) {
             options->probe = true;
+        } else if (!strcmp(argv[i], "--wait")) {
+            options->wait = true;
         } else if (!strcmp(argv[i], "--rumble-haptics")) {
             session.rumbleHaptics = true;
         } else if (!strcmp(argv[i], "--triggers") && i + 1 < argc) {
@@ -346,7 +348,8 @@ static bool parseArguments(int argc, char **argv, BrokerOptions *options) {
 }
 
 // The options the pad cannot honour are declined here, each with a log line,
-// and the fixed trigger effects go out before the session reports ready.
+// and the fixed trigger effects go out before the session reports ready (in a
+// session that waits for its pad, as soon as the pad connects).
 static void applyTitleOptions(void) {
     if (session.rumbleHaptics && !(abilities & DSB_CAN_HAPTICS)) {
         session.rumbleHaptics = false;
@@ -441,6 +444,69 @@ static int probe(void) {
     return 0;
 }
 
+static void writeWaitingStatus(NSString *status, NSString *state, unsigned port, double since,
+                               uint64_t dropped) {
+    NSDictionary *obj = @{
+        @"state" : state,
+        @"backend" : @(backend->name),
+        @"pid" : @(getpid()),
+        @"port" : @(port),
+        @"waitingSince" : @(since),
+        @"droppedWhileWaiting" : @(dropped),
+        @"updated" : @([[NSDate date] timeIntervalSince1970])
+    };
+    [[NSJSONSerialization dataWithJSONObject:obj options:NSJSONWritingPrettyPrinted
+                                       error:NULL] writeToFile:status atomically:YES];
+}
+
+// --wait: the session has no pad yet, because it was off or still waking when
+// the game started, or it went away mid-session. The socket is bound and
+// announced first, so the game starts with its port; what arrives before the
+// pad is dropped, and the backend's probe asks again every second. True once a
+// session can take a pad; false when the session ends first.
+static bool waitForPad(int fd, const BrokerOptions *options, unsigned port) {
+    double start = CFAbsoluteTimeGetCurrent(), nextProbe = 0, nextStatus = 0;
+    double since = [[NSDate date] timeIntervalSince1970];
+    // A dry run probes nothing: DSB_TEST_PAD_AFTER is when its pad connects.
+    const char *after = getenv("DSB_TEST_PAD_AFTER");
+    double connectsAt = session.dry && after ? strtod(after, NULL) : -1;
+    uint64_t dropped = 0;
+    fprintf(stderr, "No pad yet; the session waits for one\n");
+    while (!session.quitting) {
+        double now = CFAbsoluteTimeGetCurrent();
+        if (options->parent && kill(options->parent, 0) && errno == ESRCH) {
+            break;
+        }
+        if (options->seconds && now - start >= options->seconds) {
+            break;
+        }
+        uint8_t datagram[sizeof(DSBPacket) + 1];
+        while (recv(fd, datagram, sizeof(datagram), 0) >= 0) {
+            dropped++;
+        }
+        if (now >= nextProbe) {
+            DSBProbe found = {0};
+            bool connected = session.dry ? connectsAt >= 0 && now - start >= connectsAt
+                                         : !backend->probe(&found) && found.eligible;
+            if (connected) {
+                fprintf(stderr, "Pad connected after %.1f s of waiting; %llu packets dropped meanwhile\n",
+                        now - start, dropped);
+                return true;
+            }
+            nextProbe = now + 1;
+        }
+        if (options->status && now >= nextStatus) {
+            writeWaitingStatus(options->status, @"waiting", port, since, dropped);
+            nextStatus = now + 1;
+        }
+        usleep(20000);
+    }
+    if (options->status) {
+        writeWaitingStatus(options->status, @"stopped", port, since, dropped);
+    }
+    return false;
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         id activity = [[NSProcessInfo processInfo]
@@ -459,12 +525,6 @@ int main(int argc, char **argv) {
         if (options.probe) {
             return probe();
         }
-        int controllerResult = backend->open();
-        if (controllerResult) {
-            return controllerResult;
-        }
-        abilities = backend->abilities();
-        bool realTime = backend->realTime();
         int fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (fd < 0) {
             return 6;
@@ -481,6 +541,20 @@ int main(int argc, char **argv) {
             return 6;
         }
         unsigned port = ntohs(addr.sin_port);
+        if (options.wait) {
+            printf("{\"ready\":true,\"port\":%u,\"pid\":%d,\"waiting\":true}\n", port, getpid());
+            if (!waitForPad(fd, &options, port)) {
+                close(fd);
+                [[NSProcessInfo processInfo] endActivity:activity];
+                return 0;
+            }
+        }
+        int controllerResult = backend->open();
+        if (controllerResult) {
+            return controllerResult;
+        }
+        abilities = backend->abilities();
+        bool realTime = backend->realTime();
         CFFileDescriptorRef socketEvents = NULL;
         CFRunLoopSourceRef socketSource = NULL;
         if (realTime) {
@@ -500,7 +574,9 @@ int main(int argc, char **argv) {
         if (!backend->start()) {
             return 9;
         }
-        printf("{\"ready\":true,\"port\":%u,\"pid\":%d}\n", port, getpid());
+        if (!options.wait) {
+            printf("{\"ready\":true,\"port\":%u,\"pid\":%d}\n", port, getpid());
+        }
         NSString *calibrationPath = [NSHomeDirectory()
             stringByAppendingPathComponent:
                 @"Library/Application Support/notproton/controllers/dualsense/calibration.json"];

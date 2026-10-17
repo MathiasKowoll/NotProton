@@ -111,18 +111,19 @@ static BOOL container_of(const WCHAR *prefix, GUID *out, WCHAR *found_id, DWORD 
     BOOL found = FALSE;
 
     /* The bridge names the paired model; another Sony node left from an
-     * earlier pad is not this session's. */
-    WCHAR want[32] = L"VID_054C&PID_";
+     * earlier pad is not this session's. A session that waited for its pad
+     * does not know the model (DSB_PRODUCT unset) and takes either one. */
+    WCHAR want[2][24] = { L"VID_054C&PID_0CE6", L"VID_054C&PID_0DF2" };
+    int wants = 2;
     char product[8];
     DWORD n = GetEnvironmentVariableA("DSB_PRODUCT", product, sizeof(product));
     if (n == 4)
     {
-        MultiByteToWideChar(CP_ACP, 0, product, 4, want + 13, 5);
-        want[17] = 0;
-        CharUpperW(want);
+        MultiByteToWideChar(CP_ACP, 0, product, 4, want[0] + 13, 5);
+        want[0][17] = 0;
+        CharUpperW(want[0]);
+        wants = 1;
     }
-    else
-        lstrcpyW(want, L"VID_054C&PID_");
 
     info.cbSize = sizeof(info);
     for (i = 0; set != INVALID_HANDLE_VALUE && !found && SetupDiEnumDeviceInfo(set, i, &info); i++)
@@ -131,7 +132,7 @@ static BOOL container_of(const WCHAR *prefix, GUID *out, WCHAR *found_id, DWORD 
         if (!SetupDiGetDeviceInstanceIdW(set, &info, id, ARRAY_SIZE(id), NULL)) continue;
         CharUpperW(id);
         if (wcsncmp(id, prefix, wcslen(prefix))) continue;
-        if (!wcsstr(id, want)) continue;
+        if (!wcsstr(id, want[0]) && (wants < 2 || !wcsstr(id, want[1]))) continue;
         swprintf(path, ARRAY_SIZE(path), L"System\\CurrentControlSet\\Enum\\%ls", id);
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ, &key)) continue;
         size = sizeof(value);

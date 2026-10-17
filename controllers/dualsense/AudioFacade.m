@@ -54,6 +54,8 @@ static OSStatus virtualProperty(AudioObjectID id, const AudioObjectPropertyAddre
         break;
     case kAudioDevicePropertyModelUID: {
         // The pad the launcher found, so an Edge is not announced as a standard pad.
+        // A session that waited for its pad has none yet and says the standard
+        // one; Wine 11.15's winecoreaudio never reads this property.
         const char *product = getenv("DSB_PRODUCT");
         s = product && !strcmp(product, "0df2") ? CFSTR("054c:0df2:wireless")
                                                 : CFSTR("054c:0ce6:wireless");

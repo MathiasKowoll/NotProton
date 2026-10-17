@@ -353,7 +353,10 @@ static volatile LONG pad_connected;
 static BYTE pad_report[64];
 static DWORD pad_packet;
 static WCHAR pad_want[24] = L"VID_054C&PID_0CE6";
-static WORD pad_product = 0x0ce6;
+static volatile WORD pad_product = 0x0ce6;
+/* A session that waited for its pad does not know the model (DSB_PRODUCT
+ * unset): either one is taken, and the one found names the product. */
+static BOOL pad_any_model;
 
 /* The bridged pad's HID interface: the raw Sony device, never wine's own
  * XInput-compatible node (&IG_). */
@@ -388,7 +391,9 @@ static HANDLE open_pad(void)
         }
         lstrcpynW(upper, detail->DevicePath, 512);
         CharUpperW(upper);
-        if (!wcsstr(upper, pad_want) || wcsstr(upper, L"&IG_"))
+        if ((pad_any_model ? !wcsstr(upper, L"VID_054C&PID_0CE6") && !wcsstr(upper, L"VID_054C&PID_0DF2")
+                           : !wcsstr(upper, pad_want))
+            || wcsstr(upper, L"&IG_"))
         {
             HeapFree(GetProcessHeap(), 0, detail);
             continue;
@@ -404,6 +409,7 @@ static HANDLE open_pad(void)
                 && caps.InputReportByteLength >= 11)
             {
                 found = h;
+                if (pad_any_model) pad_product = wcsstr(upper, L"PID_0DF2") ? 0x0df2 : 0x0ce6;
                 logf_("pad as XInput: reading %ls (input %u bytes)", detail->DevicePath, caps.InputReportByteLength);
             }
             HidD_FreePreparsedData(pre);
@@ -515,8 +521,12 @@ static BOOL CALLBACK init_pad(INIT_ONCE *o, void *param, void **ctx)
         logf_("pad as XInput: off (DSB_DEVICE %s builds no XInput pad here)", device);
         return TRUE;
     }
-    if (GetEnvironmentVariableA("DSB_PRODUCT", product, sizeof(product)) == 4
-        && !_stricmp(product, "0df2"))
+    if (GetEnvironmentVariableA("DSB_PRODUCT", product, sizeof(product)) != 4)
+    {
+        pad_any_model = TRUE;
+        lstrcpyW(pad_want, L"VID_054C&PID_0CE6|0DF2");
+    }
+    else if (!_stricmp(product, "0df2"))
     {
         lstrcpyW(pad_want, L"VID_054C&PID_0DF2");
         pad_product = 0x0df2;

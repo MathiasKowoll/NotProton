@@ -134,7 +134,9 @@ func main() throws -> Int32 {
     if let named = environment["NOTPROTON_PAD_BACKEND"], namedBackend == nil {
         fputs("DualSense launch: NOTPROTON_PAD_BACKEND=\(named) not understood; ignored\n", stderr)
     }
-    func probe() throws -> (eligible: Bool, usb: Int, product: String, backend: String, vendor: String) {
+    func probe() throws -> (
+        eligible: Bool, usb: Int, bluetooth: Int, product: String, backend: String, vendor: String
+    ) {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = root.appendingPathComponent("broker")
@@ -145,16 +147,16 @@ func main() throws -> Int32 {
         defer { stop(process) }
         let state = try readJSON(pipe, timeout: 5)
         guard let eligible = state["eligible"] as? Bool, let usb = state["usb"] as? Int,
-            state["bluetooth"] is Int
+            let bluetooth = state["bluetooth"] as? Int
         else { throw LaunchError("Incomplete controller probe") }
         // An older broker names neither the backend nor the model: that was a
         // standard DualSense.
         return (
-            eligible, usb, state["product"] as? String ?? "0ce6",
+            eligible, usb, bluetooth, state["product"] as? String ?? "0ce6",
             state["backend"] as? String ?? "dualsense", state["vendor"] as? String ?? "054c"
         )
     }
-    var state: (eligible: Bool, usb: Int, product: String, backend: String, vendor: String)?
+    var state: (eligible: Bool, usb: Int, bluetooth: Int, product: String, backend: String, vendor: String)?
     var probeError: Error?
     for attempt in 0..<3 {
         do {
@@ -170,7 +172,15 @@ func main() throws -> Int32 {
         try bypass("probe-failed")
     }
     guard let state else { try bypass("probe-failed") }
-    if !state.eligible {
+    // No pad at all is a pad still to come: one that was off, or still waking,
+    // when the game started. The session waits for it, and takes it when it
+    // connects, rather than leaving the game without the bridge
+    // (NOTPROTON_PAD_WAIT=0 keeps that). Two pads, or one on a cable, are not
+    // a session's to take.
+    let waiting =
+        !state.eligible && state.usb == 0 && state.bluetooth == 0 && state.backend == "dualsense"
+        && environment["NOTPROTON_PAD_WAIT"] != "0"
+    if !state.eligible && !waiting {
         try bypass(state.usb > 0 ? "original-usb" : "no-single-bluetooth-dualsense")
     }
 
@@ -261,7 +271,7 @@ func main() throws -> Int32 {
     } else if let unknown = environment["NOTPROTON_PAD_TRIGGERS"] {
         fputs("DualSense launch: NOTPROTON_PAD_TRIGGERS=\(unknown) not understood; triggers left alone\n", stderr)
     }
-    func startBroker(port: Int? = nil) throws -> Int {
+    func startBroker(port: Int? = nil, wait: Bool = false) throws -> Int {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = root.appendingPathComponent("broker")
@@ -271,6 +281,7 @@ func main() throws -> Int32 {
         ]
         if pcm { arguments.append("--pcm") }
         if let port { arguments += ["--port", String(port)] }
+        if wait { arguments.append("--wait") }
         if rumbleHaptics { arguments.append("--rumble-haptics") }
         if let triggerSpec { arguments += ["--triggers", triggerSpec] }
         process.arguments = arguments
@@ -292,17 +303,23 @@ func main() throws -> Int32 {
     // drives it, and the vendor and model the game sees. An Edge stays an Edge
     // unless the title's Sony library knows only the standard pad
     // (NOTPROTON_PAD_AS=dualsense).
+    // A session that waits for its pad does not know the model yet: the pieces
+    // then take either one, and 0ce6 stands only for an Edge asked to be a
+    // standard pad.
     let presentAsStandard =
         state.backend == "dualsense" && environment["NOTPROTON_PAD_AS"] == "dualsense"
-        && state.product == "0df2"
+        && (state.product == "0df2" || waiting)
     environment["DSB_DEVICE"] = state.backend
-    environment["DSB_VENDOR"] = state.vendor
-    environment["DSB_PRODUCT"] = presentAsStandard ? "0ce6" : state.product
+    environment["DSB_VENDOR"] = waiting ? "054c" : state.vendor
+    environment["DSB_PRODUCT"] = presentAsStandard ? "0ce6" : waiting ? nil : state.product
     if presentAsStandard {
         fputs("DualSense launch: Edge presented as a standard DualSense (NOTPROTON_PAD_AS=dualsense)\n", stderr)
     }
+    if waiting {
+        fputs("DualSense launch: no pad yet; the bridge takes one when it connects (NOTPROTON_PAD_WAIT=0 starts without it)\n", stderr)
+    }
     let port: Int
-    do { port = try startBroker() } catch {
+    do { port = try startBroker(wait: waiting) } catch {
         stop(broker)
         // Its pipe would otherwise stay open in the run script and in Wine.
         try? brokerPipe?.fileHandleForReading.close()
@@ -312,7 +329,7 @@ func main() throws -> Int32 {
     }
     environment["DSB_PORT"] = String(port)
     environment["DSB_TOKEN"] = token
-    environment["DSB_ROUTE"] = "bridge"
+    environment["DSB_ROUTE"] = waiting ? "bridge-waiting" : "bridge"
     if state.backend == "dualsense" {
         environment["DSB_RAW"] = pcm ? "1:pcm" : "1"
         environment["DSB_LIBRARY"] = root.appendingPathComponent("bridge.dylib").path
@@ -347,23 +364,19 @@ func main() throws -> Int32 {
         if !disabled, let service = broker, !service.isRunning {
             reconnects.removeAll { Date().timeIntervalSince($0) >= 60 }
             // 10: the pad went away. 11: an output write stalled -- a congested
-            // Bluetooth link, not a lost pad, so a fresh broker gets it back.
+            // Bluetooth link, not a lost pad. Either way a broker that waits on
+            // the same port takes the pad back when it is there again, however
+            // long that takes; a stalled pad is taken at once.
             if (service.terminationStatus == 10 || service.terminationStatus == 11)
                 && reconnects.count < 3
             {
                 reconnects.append(Date())
-                let deadline = Date(timeIntervalSinceNow: 60)
-                while game.isRunning && Date() < deadline {
-                    tick(0.5)
-                    guard let reconnected = try? probe(), reconnected.eligible else { continue }
-                    do {
-                        _ = try startBroker(port: port)
-                        try saveSession()
-                    } catch {
-                        stop(broker)
-                        disabled = true
-                    }
-                    break
+                do {
+                    _ = try startBroker(port: port, wait: true)
+                    try saveSession()
+                } catch {
+                    stop(broker)
+                    disabled = true
                 }
             }
             if broker?.isRunning != true {

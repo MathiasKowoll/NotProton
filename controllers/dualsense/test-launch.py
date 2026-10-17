@@ -31,7 +31,8 @@ from pathlib import Path
 
 if '--probe' in sys.argv:
     usb = int(os.environ.get('TEST_USB', '0'))
-    found = dict(bluetooth=0 if usb else 1, usb=usb, eligible=not usb)
+    bluetooth = int(os.environ.get('TEST_BLUETOOTH', '0' if usb else '1'))
+    found = dict(bluetooth=bluetooth, usb=usb, eligible=bluetooth == 1 and not usb)
     if os.environ.get('TEST_BACKEND'):
         found.update(backend=os.environ['TEST_BACKEND'], vendor='045e', product='0b13')
     if '--backend' in sys.argv:
@@ -183,6 +184,33 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
         assert (observed["DSB_RAW"] is not None) == bridged and observed["DSB_DEVICE"] == device, observed
     print("  ok    dualsense launcher: a backend asked by name, without the DualSense's bridge", flush=True)
 
+    # No pad at all: the session waits for one, bridged, with a broker told to
+    # wait; the model is unknown, so the pieces get none unless an Edge is to
+    # be a standard pad. Two pads still start without the bridge, and so does
+    # no pad with NOTPROTON_PAD_WAIT=0.
+    for pads, extra, route, product in [
+        ("0", {}, "bridge-waiting", None),
+        ("0", {"NOTPROTON_PAD_AS": "dualsense"}, "bridge-waiting", "0ce6"),
+        ("0", {"NOTPROTON_PAD_WAIT": "0"}, "no-single-bluetooth-dualsense", None),
+        ("2", {}, "no-single-bluetooth-dualsense", None),
+    ]:
+        env = dict(clean, NOTPROTON_RAW_CONTROLLERS="1", TEST_BLUETOOTH=pads, **extra)
+        recorded = root / "broker-args.json"
+        recorded.unlink(missing_ok=True)
+        result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=12)
+        assert result.returncode == 0, (pads, extra, result.stderr)
+        observed = json.loads(result.stdout.splitlines()[-1])
+        assert observed["DSB_ROUTE"] == route, (pads, extra, observed)
+        if route == "bridge-waiting":
+            assert "--wait" in json.loads(recorded.read_text()), recorded.read_text()
+            assert observed["DSB_LIBRARY"] == str(root / "bridge.dylib"), observed
+            assert (observed["DSB_DEVICE"], observed["DSB_VENDOR"], observed["DSB_PRODUCT"]) == (
+                "dualsense", "054c", product), observed
+        else:
+            assert not recorded.exists(), (pads, extra)
+            assert observed["DSB_LIBRARY"] is None and observed["DSB_PRODUCT"] is None, observed
+    print("  ok    dualsense launcher: no pad yet waits for one; two pads and NOTPROTON_PAD_WAIT=0 do not", flush=True)
+
     env = dict(clean, NOTPROTON_RAW_CONTROLLERS="1")
     result = subprocess.run(
         args, env=dict(env, TEST_CHILD_EXIT="23"), capture_output=True, timeout=12
@@ -226,6 +254,9 @@ sys.exit(int(os.environ.get('TEST_CHILD_EXIT', '0')))
         assert resumed.returncode == 0, err
         assert len({x[0] for x in observed}) == 2, "physical removal should restart broker once"
         assert len({x[1:] for x in observed}) == 1, "reconnect must retain port and session credentials"
+        # The broker that takes the pad back waits for it, on the same port.
+        restarted = json.loads((root / "broker-args.json").read_text())
+        assert "--wait" in restarted and restarted[restarted.index("--port") + 1] == "54565", restarted
         assert not record.exists()
         print("  ok    physical reconnect retains session and port", flush=True)
     finally:

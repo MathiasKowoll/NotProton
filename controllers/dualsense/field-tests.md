@@ -56,6 +56,7 @@ what it was without the bridge.
 | Steam Input route: the SDL variables reach Wine when direct mode is off | `compat_run.sh` | measured (Wo Long, DMC5; pr90.14) |
 | `NOTPROTON_PAD_RUMBLE=haptics` and `NOTPROTON_PAD_TRIGGERS` | `broker.m`, `PCM.h`, `TriggerSpec.h` | measured (Ragnarök, pr90.20 to pr90.24) |
 | The Controllers section on Steam's Compatibility page, and `suggested-options.json` | `dylib/feats/webpatch.c`, `suggested-options.json` | the panel was used for the Ragnarök runs; 26 titles suggested |
+| A session that starts before its pad (see the last section) | `launch.swift`, `broker.m`, `xinput/`, `mmdevapi/` | built, tested offline |
 
 ## Findings
 
@@ -205,7 +206,7 @@ status file.
 | Standard DualSense over Bluetooth | owed: Beast, Spider-Man 2, Mortal Shell II |
 | Pad on a cable | the launcher steps aside (`original-usb`); not played since the change |
 | Two Sony pads connected | the launcher steps aside (`no-single-bluetooth-dualsense`); not played |
-| Pad off or waking at launch | stepped aside and the game started (Spider-Man 2, Life is Strange: Double Exposure, Requiem); a pad switched on later is not bridged until the game is relaunched |
+| Pad off or waking at launch | stepped aside and the game started (Spider-Man 2, Life is Strange: Double Exposure, Requiem). Replaced by the waiting session below; not played yet |
 | Pad lost mid-game | offline only: the broker restarts on exit 10/11 |
 | Edge back paddles and Fn | the Edge assigns them itself; nothing broke |
 | Switching route between launches of one title | measured: Double Exposure without the bridge then with it, DMC5, MGS4 and Savage Planet across routes; the pieces were restored and staged again each time |
@@ -243,11 +244,74 @@ payload byte for byte. Spider-Man 2 at
 at 22:40 logged the Steam Input pad route with its vibration sent to the
 bridged pad.
 
+## A session that starts before its pad
+
+Asked for: a pad switched on after the game has started should still be
+bridged. Before this change the launcher's probe found no pad, the session
+stepped aside (`no-single-bluetooth-dualsense`) and the game ran without the
+bridge until it was relaunched.
+
+What makes it possible: `bridge.dylib` decides per call, for every device,
+whether it is a Bluetooth DualSense, and Wine's IOHID bus adds a device that
+connects later. The virtual audio device depends only on the session's
+environment, so it exists from the start. The XInput pad already reopens the
+pad every second until it finds one. Only the launcher and the broker needed
+a pad at start.
+
+What changed:
+
+- **Launcher.** No pad at all (none over Bluetooth, none on a cable) starts a
+  bridged session that waits: `DSB_ROUTE=bridge-waiting`, the broker started
+  with `--wait`. Two pads, a pad on a cable, or `NOTPROTON_PAD_WAIT=0` step
+  aside as before. The model is unknown, so `DSB_PRODUCT` is left unset,
+  unless `NOTPROTON_PAD_AS=dualsense` asks for any Edge to be a standard pad
+  (then 0ce6). `DSB_VENDOR` is 054c.
+- **Broker.** With `--wait` it binds and announces its port first, drops what
+  arrives before the pad, probes once a second, and opens the pad when
+  exactly one is connected over Bluetooth. Fixed trigger effects go out then.
+  While it waits, the status file says `state: waiting`, with
+  `waitingSince` and `droppedWhileWaiting`. It leaves with its launcher, and
+  stops cleanly (`state: stopped`) if no pad ever comes.
+- **Pad lost mid-game.** On exit 10 or 11 the launcher now restarts the
+  broker with `--wait` on the same port, so the pad is taken back whenever it
+  returns. Before, the launcher probed for 60 s and then gave up for the rest
+  of the session. Three restarts a minute is still the limit.
+- **Pieces.** With `DSB_PRODUCT` unset, the XInput pad and the ContainerId
+  answer take either model, 0ce6 or 0df2, and the XInput pad reports the one
+  it found. Before, the XInput pad looked only for 0ce6 and the ContainerId
+  answer took any Sony node.
+- **Audio device model.** With no model known the device says 0ce6. Wine
+  11.15's winecoreaudio never reads this property.
+
+Tested offline:
+
+- `test-wait.py`: the port is announced before the pad; motors sent while
+  waiting are dropped and counted; motors sent after the pad connects play
+  (peak over 0.7); with no pad the broker stops cleanly; it leaves when its
+  launcher's process goes.
+- `test-launch.py`: no pad gives `bridge-waiting` with `--wait`, the bridge's
+  library and no model; `NOTPROTON_PAD_AS=dualsense` gives 0ce6; two pads and
+  `NOTPROTON_PAD_WAIT=0` step aside; a broker that exits 10 is restarted with
+  `--wait` on the same port and with the same credentials.
+
+Still to measure on a pad:
+
+- An audio-haptics title (Spider-Man 2 or Beast) started with the pad off,
+  the pad switched on in the menu: does the game ask for the ContainerId
+  again when the pad arrives? It asked once at start in every run so far,
+  always with the pad present.
+- An XInput-pad title (DMC5) started with the pad off: does the device-arrival
+  message reach the game, and does it ask `XInputGetCapabilities` again?
+- A pad switched off mid-game for more than a minute, then on.
+- Resident Evil Requiem: started with the pad off, it used to get no bridge
+  and vibrated. Now it gets the bridge when the pad connects. It needs
+  `DSB_DISABLED=1`, like PRAGMATA, to keep that.
+
 ## Automated tests
 
 | Suite | Covers |
 |---|---|
-| `make dualsense-check` | the PCM unit tests, the controls byte tests, the HID and output tests, then `test-launch.py`, `test-bridge.py`, `test-pcm.py` (twice, once with deferred timers), `test-sources.py`, `test-link-budget.py`, `test-lifecycle.py`, `test-trigger-routing.py`, `test-rumble-haptics.py` |
+| `make dualsense-check` | the PCM unit tests, the controls byte tests, the HID and output tests, then `test-launch.py`, `test-bridge.py`, `test-pcm.py` (twice, once with deferred timers), `test-sources.py`, `test-wait.py`, `test-link-budget.py`, `test-lifecycle.py`, `test-trigger-routing.py`, `test-rumble-haptics.py` |
 | `dylib/tests/padstagecheck.sh` | staging and restoring the pieces in fake prefixes |
 | `make steam-rumble-check`, `make settingscheck`, `make runcheck` | the Steam Input adapter, the panel's settings, the run script |
 | `dylib/tests/suggested-options-check.py` | `suggested-options.json` and the panel's allowlist |
@@ -264,7 +328,7 @@ Two cautions, both observed:
 
 ## Open
 
-- A pad switched on after the game started: the session should wait for it.
+- The waiting session on a pad (the list above).
 - Steam's virtual pad under Wine (finding 8), which blocks the hybrid mode.
 - Several pads in the Steam Input route; `XInputEnable` for the XInput pad;
   the Core Haptics exit codes; hysteresis at the 100 Hz gate.
