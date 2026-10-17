@@ -171,4 +171,60 @@ struct RunnerPatcherTests {
             arches == RunnerPatcher.windowsBuiltins.map(\.arch) + ["aarch64-unix", "x86_64-unix"])
         #expect(RunnerPatcher.builtins(in: root).allSatisfy { $0.name.hasPrefix("lsteamclient") })
     }
+
+    private static func audioRunner(_ label: String) throws -> (work: URL, root: URL, bridge: URL, dir: URL) {
+        let work = try scratchDirectory(label)
+        let root = work.appending(path: "runner")
+        let bridge = work.appending(path: "bridge")
+        let dir = root.appending(path: "lib/wine/x86_64-windows")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: bridge.appending(path: "x86_64-windows"), withIntermediateDirectories: true)
+        return (work, root, bridge, dir)
+    }
+
+    @Test("The audio piece takes mmdevapi.dll's place and Wine's own stays beside it")
+    func installsAudioPiece() throws {
+        let (work, root, bridge, dir) = try Self.audioRunner("audio-piece")
+        defer { try? FileManager.default.removeItem(at: work) }
+        var wine = Data(count: 0x60) + Data("wine's mmdevapi".utf8)
+        wine.replaceSubrange(0x40..<0x50, with: Data("Wine builtin DLL".utf8))
+        var plain = wine
+        plain.replaceSubrange(0x40..<0x50, with: Data(count: 16))
+        try wine.write(to: dir.appending(path: "mmdevapi.dll"))
+        try Data("the piece".utf8).write(to: bridge.appending(path: "x86_64-windows/mmdevapi.dll"))
+
+        #expect(RunnerPatcher.audioPieceProblems(root: root, bridge: bridge) == [
+            "x86_64-windows/mmdevapi.dll is out of date", "x86_64-windows/mmdevapi_np.dll is missing",
+        ])
+        #expect(try RunnerPatcher.installAudioPiece(root: root, bridge: bridge)
+            == ["x86_64-windows/mmdevapi_np.dll", "x86_64-windows/mmdevapi.dll"])
+        #expect(try Data(contentsOf: dir.appending(path: "mmdevapi.dll")) == Data("the piece".utf8))
+        // Kept without the builtin signature, so Wine maps that file and not the piece.
+        #expect(try Data(contentsOf: dir.appending(path: "mmdevapi_np.dll")) == plain)
+        #expect(try Data(contentsOf: dir.appending(path: "mmdevapi.dll.notproton-orig")) == wine)
+        #expect(RunnerPatcher.audioPieceProblems(root: root, bridge: bridge).isEmpty)
+        #expect(try RunnerPatcher.installAudioPiece(root: root, bridge: bridge).isEmpty)
+
+        try Data("a newer piece".utf8).write(to: bridge.appending(path: "x86_64-windows/mmdevapi.dll"))
+        #expect(RunnerPatcher.audioPieceProblems(root: root, bridge: bridge)
+            == ["x86_64-windows/mmdevapi.dll is out of date"])
+        #expect(try RunnerPatcher.installAudioPiece(root: root, bridge: bridge)
+            == ["x86_64-windows/mmdevapi.dll"])
+        #expect(try Data(contentsOf: dir.appending(path: "mmdevapi_np.dll")) == plain)
+    }
+
+    // The piece forwards to mmdevapi_np.dll: made from the piece itself, it would call itself.
+    @Test("Without Wine's own mmdevapi kept, the piece is not installed")
+    func refusesAudioPieceWithoutWinesOwn() throws {
+        let (work, root, bridge, dir) = try Self.audioRunner("audio-piece-lost")
+        defer { try? FileManager.default.removeItem(at: work) }
+        try Data("the piece".utf8).write(to: bridge.appending(path: "x86_64-windows/mmdevapi.dll"))
+        try Data("the piece".utf8).write(to: dir.appending(path: "mmdevapi.dll"))
+
+        #expect(throws: StepFailure.self) { try RunnerPatcher.installAudioPiece(root: root, bridge: bridge) }
+        #expect(!FileManager.default.fileExists(atPath: dir.appending(path: "mmdevapi_np.dll").path))
+        #expect(RunnerPatcher.audioPieceProblems(root: root, bridge: bridge)
+            == ["x86_64-windows/mmdevapi_np.dll is missing"])
+    }
 }

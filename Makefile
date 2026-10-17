@@ -560,12 +560,22 @@ WINE_BUILD := scratch/wine-build-dual
 
 WINE_BUILD_ARM64 := scratch/wine-build-arm64
 
+MMDEVAPI := $(OUT_DIR)/mmdevapi/mmdevapi.dll
+
+$(MMDEVAPI): mmdevapi/container.c mmdevapi/mmdevapi.def mmdevapi/build.sh
+	mmdevapi/build.sh $(OUT_DIR)/mmdevapi
+
+.PHONY: mmdevapicheck
+mmdevapicheck: $(MMDEVAPI)
+	mmdevapi/check.sh $(MMDEVAPI)
+
 BRIDGE_FILES := \
 	$(WINE_BUILD)/programs/steam.exe/x86_64-windows/steam.exe:steam.exe \
 	$(WINE_BUILD)/dlls/lsteamclient/x86_64-windows/lsteamclient.dll:x86_64-windows-lsteamclient.dll \
 	$(WINE_BUILD)/dlls/lsteamclient/lsteamclient.so:x86_64-unix-lsteamclient.so \
 	$(WINE_BUILD_ARM64)/dlls/lsteamclient/lsteamclient.so:aarch64-unix-lsteamclient.so \
-	$(WINE_BUILD)/dlls/lsteamclient/i386-windows/lsteamclient.dll:i386-windows-lsteamclient.dll
+	$(WINE_BUILD)/dlls/lsteamclient/i386-windows/lsteamclient.dll:i386-windows-lsteamclient.dll \
+	$(MMDEVAPI):x86_64-windows-mmdevapi.dll
 
 bridge:
 	bridge/setup-wine-tree.sh
@@ -579,7 +589,7 @@ bridge:
 fonts:
 	fonts/build.sh
 
-app-payload: $(TARGET) $(OVERLAY_SHIM) $(ICONMAKER) $(APPINFO)
+app-payload: $(TARGET) $(OVERLAY_SHIM) $(ICONMAKER) $(APPINFO) $(MMDEVAPI)
 	@mkdir -p "$(APP_PAYLOAD)/signatures/macos.arm64"
 	@mkdir -p "$(APP_PAYLOAD)/bridge"
 	cp -f $(TARGET) "$(APP_PAYLOAD)/notproton.dylib"

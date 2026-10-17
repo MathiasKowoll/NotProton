@@ -124,6 +124,7 @@ jobs:
           make -s envcheck
           make -s buildcheck
           make -s settingscheck
+          make -s mmdevapicheck
           make -s routecheck
           make -s bridgecheck
           make -s gamedrivecheck

@@ -31,6 +31,9 @@ enum BridgePayload {
         Entry(resource: "i386-windows-lsteamclient.dll", bridgePaths: [
             "i386-windows/lsteamclient.dll",
         ]),
+        Entry(resource: "x86_64-windows-mmdevapi.dll", bridgePaths: [
+            "x86_64-windows/mmdevapi.dll",
+        ]),
     ]
 
     struct Located: Sendable {

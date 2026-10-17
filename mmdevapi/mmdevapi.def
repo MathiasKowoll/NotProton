@@ -1,0 +1,26 @@
+LIBRARY mmdevapi.dll
+EXPORTS
+    ordinal2 @2 NONAME
+    ordinal3 @3 NONAME
+    ordinal4 @4 NONAME
+    ordinal5 @5 NONAME
+    ordinal6 @6 NONAME
+    ordinal7 @7 NONAME
+    ordinal8 @8 NONAME
+    ordinal9 @9 NONAME
+    ordinal10 @10 NONAME
+    ordinal11 @11 NONAME
+    ordinal12 @12 NONAME
+    ordinal13 @13 NONAME
+    ordinal14 @14 NONAME
+    ordinal15 @15 NONAME
+    ordinal16 @16 NONAME
+    ActivateAudioInterfaceAsync @17
+    DllCanUnloadNow @18 PRIVATE
+    DllGetClassObject @19 PRIVATE
+    DllRegisterServer @20 PRIVATE
+    DllUnregisterServer @21 PRIVATE
+    DriverProc @22 PRIVATE
+    auxMessage @23 PRIVATE
+    midMessage @24 PRIVATE
+    modMessage @25 PRIVATE

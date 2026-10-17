@@ -13,6 +13,13 @@ enum RunnerPatcher {
         (arch: "x86_64-windows", name: "lsteamclient.dll"),
     ]
 
+    // Wine's audio endpoints have no ContainerId, so a game that plays a DualSense's
+    // haptics as audio cannot find the pad's endpoint. The runner's x86_64 mmdevapi.dll
+    // answers it (mmdevapi/container.c) and calls Wine's own for the rest, kept beside it
+    // without its builtin signature: Wine maps a file that has one by its export name,
+    // mmdevapi.dll, which would be the piece itself.
+    static let audioPiece = (arch: "x86_64-windows", name: "mmdevapi.dll", wine: "mmdevapi_np.dll")
+
     static func builtins(in root: URL) -> [(arch: String, name: String)] {
         windowsBuiltins + unixArches(in: root).map { (arch: $0, name: "lsteamclient.so") }
     }
@@ -43,6 +50,7 @@ enum RunnerPatcher {
         var outcome = Outcome()
         outcome.ntdll = try installNtdll(build: build, root: root, bridge: bridge)
         outcome.builtins = try installBuiltins(root: root, bridge: bridge)
+        outcome.builtins += try installAudioPiece(root: root, bridge: bridge)
         outcome.loaders = try grantLoaderEntitlement(root: root)
         return outcome
     }
@@ -76,6 +84,8 @@ enum RunnerPatcher {
                 wrong.append(String(localized: "\(builtin.arch)/\(builtin.name) is out of date"))
             }
         }
+
+        wrong += audioPieceProblems(root: root, bridge: bridge)
 
         for loader in unixLoaders(in: root) {
             let granted = entitlements(of: loader)
@@ -138,6 +148,65 @@ enum RunnerPatcher {
         }
 
         return installed
+    }
+
+    static func installAudioPiece(root: URL, bridge: URL) throws -> [String] {
+        let (arch, name, wine) = audioPiece
+        let source = bridge.appending(path: "\(arch)/\(name)")
+        guard FileManager.default.fileExists(atPath: source.path(percentEncoded: false)) else {
+            throw StepFailure(
+                step: step,
+                detail: String(localized: "\(arch)/\(name) is not in the bridge. Install NotProton first.")
+            )
+        }
+
+        let live = root.appending(path: "lib/wine/\(arch)/\(name)")
+        let kept = root.appending(path: "lib/wine/\(arch)/\(wine)")
+        // Without Wine's own copy kept, the piece would end up forwarding to itself.
+        if Clean.copy(of: live) == live, Digest.sha256IfPresent(live) == Digest.sha256IfPresent(source) {
+            throw StepFailure(step: step, detail: String(localized: "\(arch)/\(wine) is missing"))
+        }
+        try keepClean(live)
+
+        var installed: [String] = []
+        let plain = try plainCopy(of: Clean.copy(of: live))
+        if (try? Data(contentsOf: kept)) != plain {
+            try atomicReplace(kept, with: plain, step: step)
+            installed.append("\(arch)/\(wine)")
+        }
+        if Digest.sha256IfPresent(live) != Digest.sha256IfPresent(source) {
+            try atomicReplace(live, with: Data(contentsOf: source), step: step)
+            installed.append("\(arch)/\(name)")
+        }
+        return installed
+    }
+
+    static func audioPieceProblems(root: URL, bridge: URL) -> [String] {
+        let (arch, name, wine) = audioPiece
+        let live = root.appending(path: "lib/wine/\(arch)/\(name)")
+        let kept = root.appending(path: "lib/wine/\(arch)/\(wine)")
+        var wrong: [String] = []
+
+        let staged = Digest.sha256IfPresent(bridge.appending(path: "\(arch)/\(name)"))
+        if staged == nil {
+            wrong.append(String(localized: "\(arch)/\(name) is missing"))
+        } else if staged != Digest.sha256IfPresent(live) {
+            wrong.append(String(localized: "\(arch)/\(name) is out of date"))
+        }
+        let original = Clean.copy(of: live)
+        if original == live || (try? Data(contentsOf: kept)) != (try? plainCopy(of: original)) {
+            wrong.append(String(localized: "\(arch)/\(wine) is missing"))
+        }
+        return wrong
+    }
+
+    static func plainCopy(of file: URL) throws -> Data {
+        var data = try Data(contentsOf: file)
+        let field = 0x40..<0x60
+        if data.count >= field.upperBound, data[field].starts(with: Data("Wine builtin DLL".utf8)) {
+            data.replaceSubrange(field, with: Data(count: field.count))
+        }
+        return data
     }
 
     private static func grantLoaderEntitlement(root: URL) throws -> [String] {
