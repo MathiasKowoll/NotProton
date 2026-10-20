@@ -283,5 +283,37 @@ is "exit game ends the session" 143 "$rc"
 is "exit game does not wait out the shim" yes "$([ $(($(date +%s) - start)) -lt 5 ] && echo yes || echo no)"
 is "exit game tears the prefix down" yes "$(grep -q kill "$T/session.ev" && echo yes || echo no)"
 
+echo "== game mode link =="
+gm_func=$(sed -n '/^game_mode_link() {$/,/^}$/p' "$SRC")
+[ -n "$gm_func" ] || { echo "FAIL: game_mode_link not found"; exit 1; }
+eval "$gm_func"
+getconf() { printf '%s/\n' "$T/tmp"; }
+links() { find "$T/tmp" -mindepth 2 | wc -l | tr -d ' '; }
+loader_app="$T/gm/Game.app"
+mkdir -p "$loader_app/Contents/MacOS" "$T/tmp"
+printf 'loader' > "$loader_app/Contents/MacOS/wine"
+WINELOADER="$loader_app/Contents/MacOS/wine"
+touch -d 2026-01-02T03:04:05.012345678 "$WINELOADER"
+gm_want="$T/tmp/winetemp-$(stat -f '%i-%z-%m' "$WINELOADER")-12345678"
+: > "$log"
+game_mode_link "/games/Game/Game.exe" -dx12
+is "the folder is named as ntdll names it" "$WINELOADER" "$(readlink "$gm_want/Game.exe")"
+is "logged" "game mode link $gm_want/Game.exe" "$(cat "$log")"
+game_mode_link 'C:\Games\Other\Other.EXE'
+is "a Windows path" "$WINELOADER" "$(readlink "$gm_want/Other.EXE")"
+ln "$WINELOADER" "$gm_want/Old.exe"
+game_mode_link "/games/Old/Old.exe"
+is "a flat link ntdll made earlier is replaced" "$WINELOADER" "$(readlink "$gm_want/Old.exe")"
+touch -d 2026-01-02T03:04:05 "$WINELOADER"
+game_mode_link "/games/Game/Game.exe"
+is "whole seconds end in 0" "$WINELOADER" "$(readlink "$T/tmp/winetemp-$(stat -f '%i-%z-%m' "$WINELOADER")-0/Game.exe")"
+before=$(links)
+game_mode_link "/games/Game/data.pak" -windowed
+is "no exe, no link" "$before" "$(links)"
+WINELOADER="$T/runner/wine"
+game_mode_link "/games/Late/Late.exe"
+is "a loader outside the bundle gets no link" "$before" "$(links)"
+unset -f getconf
+
 [ "$fails" -eq 0 ] || { echo "launchercheck: $fails failed"; exit 1; }
 echo "launchercheck: all passed"

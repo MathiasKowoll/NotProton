@@ -1585,6 +1585,25 @@ install_bundle() (
 )
 install_bundle
 
+# CrossOver's ntdll (CW HACK 22144) restarts each process from a link named after
+# its exe in winetemp-<inode>-<size>-<mtime>-<nsec>, outside the bundle, so Game Mode
+# never sees a game. It reuses a link already there: point the game's at the bundle.
+game_mode_link() {
+  [ "$WINELOADER" = "$loader_app/Contents/MacOS/wine" ] || return 0
+  gm_exe=""
+  for gm_arg in "$@"; do
+    case "$gm_arg" in *.[Ee][Xx][Ee]) gm_exe=${gm_arg##*/}; gm_exe=${gm_exe##*\\}; break ;; esac
+  done
+  [ -n "$gm_exe" ] || return 0
+  gm_tmp=$(getconf DARWIN_USER_TEMP_DIR) || return 0
+  gm_stamp=$(stat -f '%i-%z-%.9Fm' "$WINELOADER") || return 0
+  gm_nsec=$(printf '%s' "${gm_stamp##*.}" | sed 's/^0*//')
+  gm_dir="${gm_tmp%/}/winetemp-${gm_stamp%.*}-${gm_nsec:-0}"
+  mkdir -p -m 700 "$gm_dir" && ln -sfn "$WINELOADER" "$gm_dir/$gm_exe" &&
+    echo "game mode link $gm_dir/$gm_exe" >> "$log" 2>&1 || true
+}
+game_mode_link "$@"
+
 kill_wine_prefix() {
   "$WINESERVER" -k >> "$log" 2>&1 || true
   "$WINESERVER" -w >> "$log" 2>&1 || true
